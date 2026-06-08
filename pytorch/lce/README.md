@@ -68,6 +68,18 @@ Restrict to one axis (cheaper smoke test):
 python lce_benchmark_sweep.py --dtypes bfloat16 --axes num_classes
 ```
 
+`reduction='none'` (per-sample loss). The chunked none path is a separate
+op that recomputes the chunked grads in backward (one extra logits matmul
+per chunk) since the per-sample loss makes ``grad_output`` a vector that
+cannot be precomputed in forward -- so expect higher time than `mean`/`sum`
+at a similar memory profile. CSVs are written to separate
+`*_reduction-none.csv` files and plotted to separate `*_none.png` figures,
+so a none sweep never clobbers or mixes with the `mean` results:
+
+```bash
+python lce_benchmark_sweep.py --dtypes bfloat16 --device cuda --reduction none
+```
+
 Override the swept values for one or more axes (e.g. push num_classes
 into LLaMA-3 / Qwen3 territory):
 

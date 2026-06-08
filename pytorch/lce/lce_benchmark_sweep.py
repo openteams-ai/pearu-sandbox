@@ -425,8 +425,10 @@ def main() -> int:
                     )
                     csv_paths.append(path)
 
-    # Group plots by (dtype, device)
-    grouped: dict[tuple[str, str], list[Path]] = defaultdict(list)
+    # Group plots by (dtype, device, reduction). reduction is part of the
+    # key so a reduction='none' sweep doesn't clobber the 'mean' figure and
+    # the two reductions never share a plot (their CSVs are separate files).
+    grouped: dict[tuple[str, str, str], list[Path]] = defaultdict(list)
     for p in csv_paths:
         if not p.exists():
             continue
@@ -434,10 +436,13 @@ def main() -> int:
         if not rows:
             continue
         dtype = rows[0].get("dtype", "?")
-        grouped[(dtype, device_name)].append(p)
+        reduction = rows[0].get("reduction") or "mean"
+        grouped[(dtype, device_name, reduction)].append(p)
 
-    for (dtype, dev_name), paths in grouped.items():
-        _plot(out_dir, paths, f"{dtype}_{dev_name}", include_acc_none=args.include_acc_none)
+    for (dtype, dev_name, reduction), paths in grouped.items():
+        # Keep the 'mean' figure name unchanged; suffix the others.
+        group_label = f"{dtype}_{dev_name}" + ("" if reduction == "mean" else f"_{reduction}")
+        _plot(out_dir, paths, group_label, include_acc_none=args.include_acc_none)
 
     return 0
 
