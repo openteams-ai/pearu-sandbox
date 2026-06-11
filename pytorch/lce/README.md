@@ -80,6 +80,19 @@ so a none sweep never clobbers or mixes with the `mean` results:
 python lce_benchmark_sweep.py --dtypes bfloat16 --device cuda --reduction none
 ```
 
+Probability (soft-label) targets (`--prob-target`). The target is a
+`(num_tokens, num_classes)` softmax tensor at the input dtype; the
+chunked path supports this for `mean`/`sum` (pytorch/pytorch#187053).
+The `liger` baseline is skipped (its fused op takes index targets
+only), so comparisons are vs `reference`. Note the target itself is an
+`(N, V)` tensor and contributes to every config's memory floor — expect
+smaller relative savings than the index-target sweeps. CSVs/figures get
+`prob-target` / `_prob` suffixes:
+
+```bash
+python lce_benchmark_sweep.py --dtypes bfloat16 --device cuda --prob-target
+```
+
 Override the swept values for one or more axes (e.g. push num_classes
 into LLaMA-3 / Qwen3 territory):
 

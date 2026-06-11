@@ -340,9 +340,9 @@ def main() -> int:
             return True
         return r.get("label") in ("reference", "liger") or r.get("acc_dtype") == "float32"
 
-    # Group by (dtype, device, reduction). reduction is part of the key so
-    # globbing all CSVs doesn't mix 'mean' and 'none' rows in one figure.
-    grouped: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    # Group by (dtype, device, reduction, prob_target) so globbing all
+    # CSVs doesn't mix variant rows in one figure.
+    grouped: dict[tuple[str, str, str, bool], list[dict]] = defaultdict(list)
     for p in csv_paths:
         rows = _load_rows(p)
         for r in rows:
@@ -352,10 +352,16 @@ def main() -> int:
             # use device subdir name as device label
             device_name = p.parent.name
             reduction = r.get("reduction") or "mean"
-            grouped[(dtype, device_name, reduction)].append(r)
+            # Older CSVs have no prob_target column; treat as index targets.
+            prob = r.get("prob_target") in (True, "True")
+            grouped[(dtype, device_name, reduction, prob)].append(r)
 
-    for (dtype, device_name, reduction), rows in grouped.items():
-        group_label = f"{dtype}_{device_name}" + ("" if reduction == "mean" else f"_{reduction}")
+    for (dtype, device_name, reduction, prob), rows in grouped.items():
+        group_label = (
+            f"{dtype}_{device_name}"
+            + ("" if reduction == "mean" else f"_{reduction}")
+            + ("_prob" if prob else "")
+        )
         _plot_group(out_dir, rows, group_label)
 
     return 0

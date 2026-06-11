@@ -226,6 +226,7 @@ def _measure_in_subprocess(
     dtype: str,
     device_type: str,
     reduction: str,
+    prob_target: bool,
     config: Config,
     allow_retain_graph: bool,
     warmup: int,
@@ -240,6 +241,7 @@ def _measure_in_subprocess(
         "dtype": dtype,
         "device_type": device_type,
         "reduction": reduction,
+        "prob_target": prob_target,
         "label": config.label,
         "acc_policy": config.acc_policy,
         "chunking_method": config.chunking_method,
@@ -270,6 +272,7 @@ def _measure_in_subprocess(
         "dtype": dtype,
         "device_type": device_type,
         "reduction": reduction,
+        "prob_target": prob_target,
         "allow_retain_graph": allow_retain_graph,
     }
     if proc.returncode != 0:
@@ -306,7 +309,14 @@ def _worker_main(payload: dict) -> None:
     input = torch.randn(N, D, dtype=dtype, device=device, requires_grad=True)
     linear_weight = torch.randn(V, D, dtype=dtype, device=device, requires_grad=True) * (1.0 / (D ** 0.5))
     linear_weight = linear_weight.detach().requires_grad_(True)
-    target = torch.randint(0, V, (N,), device=device)
+    prob_target = payload.get("prob_target", False)
+    if prob_target:
+        # Soft-label target: (N, V) probabilities at the input dtype
+        # (chunked-path requirement). Note the target itself is an (N, V)
+        # tensor, so it contributes to every config's memory floor.
+        target = torch.softmax(torch.randn(N, V, dtype=dtype, device=device), dim=1)
+    else:
+        target = torch.randint(0, V, (N,), device=device)
 
     if label == "liger":
         liger = _liger_callable()
@@ -362,10 +372,12 @@ def _worker_main(payload: dict) -> None:
                 # (N*D) + ref_weight (V*D) + logits (N*V) from F.linear +
                 # grad_logits/softmax temp (N*V) from F.cross_entropy
                 # backward + ref_input.grad (N*D) + ref_weight.grad (V*D),
-                # times 8 (fp64). 1.5x leaves headroom for small temps the
+                # times 8 (fp64). A probability target adds its own fp64
+                # copy (N*V). 1.5x leaves headroom for small temps the
                 # allocator may carry; tighter caused false skips on
                 # small-V configs that would fit.
-                needed = (2 * N * D + 2 * V * D + 2 * N * V) * 8 * 1.5
+                nv_terms = 3 if prob_target else 2
+                needed = (2 * N * D + 2 * V * D + nv_terms * N * V) * 8 * 1.5
                 if needed > free_bytes:
                     raise torch.OutOfMemoryError(
                         f"grad-error check would need ~{needed / (1024 ** 3):.1f} GiB, "
@@ -384,7 +396,10 @@ def _worker_main(payload: dict) -> None:
 
             ref_input = input.detach().to(torch.float64).requires_grad_(True)
             ref_weight = linear_weight.detach().to(torch.float64).requires_grad_(True)
-            ref_loss = F.cross_entropy(F.linear(ref_input, ref_weight), target, reduction=reduction)
+            # fp64 target for a probability target (lossless upcast);
+            # index targets stay int64.
+            ref_target = target.to(torch.float64) if prob_target else target
+            ref_loss = F.cross_entropy(F.linear(ref_input, ref_weight), ref_target, reduction=reduction)
             if reduction == "none":
                 ref_loss.sum().backward()
             else:
@@ -493,6 +508,7 @@ def _worker_main(payload: dict) -> None:
         "dtype": payload["dtype"],
         "device_type": device_type,
         "reduction": reduction,
+        "prob_target": prob_target,
         "allow_retain_graph": payload["allow_retain_graph"],
     }
     if timing_error is not None:
@@ -513,6 +529,14 @@ def _parse_args():
     p.add_argument("--dtype", choices=("float16", "bfloat16", "float32", "both"), default="bfloat16")
     p.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
     p.add_argument("--reduction", choices=("mean", "sum", "none"), default="mean")
+    p.add_argument(
+        "--prob-target",
+        action="store_true",
+        help="use a probability (soft-label) target of shape (N, V) at the "
+        "input dtype instead of class indices. Requires reduction mean/sum "
+        "(the chunked path falls back on none). The liger baseline is "
+        "skipped (index targets only).",
+    )
     p.add_argument("--allow-retain-graph", action="store_true")
     p.add_argument(
         "--include-acc-none",
@@ -546,7 +570,21 @@ def main() -> int:
     else:
         dtypes = [args.dtype]
 
-    has_liger = device_type == "cuda" and _liger_callable() is not None
+    if args.prob_target and args.reduction == "none":
+        print(
+            "error: --prob-target requires --reduction mean/sum (the chunked "
+            "path falls back to the reference on none, so the benchmark "
+            "would silently measure the reference)",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Liger's fused linear cross entropy supports index targets only.
+    has_liger = (
+        device_type == "cuda"
+        and not args.prob_target
+        and _liger_callable() is not None
+    )
 
     rows: list[dict] = []
     for dtype in dtypes:
@@ -561,6 +599,7 @@ def main() -> int:
                 dtype=dtype,
                 device_type=device_type,
                 reduction=args.reduction,
+                prob_target=args.prob_target,
                 config=cfg,
                 allow_retain_graph=args.allow_retain_graph,
                 warmup=args.warmup,
@@ -588,6 +627,7 @@ def main() -> int:
             "dtype",
             "device_type",
             "reduction",
+            "prob_target",
             "allow_retain_graph",
             "time_ms",
             "memory_peak_bytes",
