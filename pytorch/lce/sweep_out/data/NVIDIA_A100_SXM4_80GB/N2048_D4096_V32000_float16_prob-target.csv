@@ -1,0 +1,12 @@
+label,acc_policy,chunking_method,acc_dtype,num_tokens,in_features,num_classes,dtype,device_type,reduction,prob_target,allow_retain_graph,time_ms,memory_peak_bytes,grad_input_error,grad_linear_weight_error,error,timing_error
+reference,,,,2048,4096,32000,float16,cuda,mean,True,False,8.329216003417969,1493435392,0.6922693059991777,0.634430762288336,,
+accurate_aspect_ratio_fp32,accurate,aspect_ratio,float32,2048,4096,32000,float16,cuda,mean,True,False,74.86361694335938,2382106624,0.12036109560058873,0.035559129478840434,,
+accurate_aspect_ratio:2_fp32,accurate,aspect_ratio:2,float32,2048,4096,32000,float16,cuda,mean,True,False,79.78495788574219,2347239936,0.12036109559576755,0.05028951092398162,,
+accurate_aspect_ratio:4_fp32,accurate,aspect_ratio:4,float32,2048,4096,32000,float16,cuda,mean,True,False,98.07564544677734,2329807360,0.12036109577398625,0.07111617373423017,,
+balanced_aspect_ratio_fp32,balanced,aspect_ratio,float32,2048,4096,32000,float16,cuda,mean,True,False,16.97177505493164,1775112192,0.376199086903152,0.5245667330005592,,
+balanced_aspect_ratio:2_fp32,balanced,aspect_ratio:2,float32,2048,4096,32000,float16,cuda,mean,True,False,29.275136947631836,1764821504,0.4130087094074445,0.5257706962419236,,
+balanced_aspect_ratio:4_fp32,balanced,aspect_ratio:4,float32,2048,4096,32000,float16,cuda,mean,True,False,53.938175201416016,1759676928,0.37623712590638864,0.5281632685812446,,
+compact_aspect_ratio_fp32,compact,aspect_ratio,float32,2048,4096,32000,float16,cuda,mean,True,False,12.904447555541992,1509164032,0.376199086903152,0.5245667330005592,,
+compact_aspect_ratio:2_fp32,compact,aspect_ratio:2,float32,2048,4096,32000,float16,cuda,mean,True,False,17.4520320892334,1509164032,0.4130087094074445,0.5257706962419236,,
+compact_aspect_ratio:4_fp32,compact,aspect_ratio:4,float32,2048,4096,32000,float16,cuda,mean,True,False,28.484607696533203,1509164032,0.37623712590638864,0.5281632685812446,,
+auto_fp32,auto,aspect_ratio:2,float32,2048,4096,32000,float16,cuda,mean,True,False,16.457727432250977,1509164032,0.4130087094074445,0.5257706962419236,,

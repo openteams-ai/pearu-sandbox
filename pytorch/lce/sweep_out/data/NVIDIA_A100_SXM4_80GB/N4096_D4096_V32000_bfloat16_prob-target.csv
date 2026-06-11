@@ -1,0 +1,12 @@
+label,acc_policy,chunking_method,acc_dtype,num_tokens,in_features,num_classes,dtype,device_type,reduction,prob_target,allow_retain_graph,time_ms,memory_peak_bytes,grad_input_error,grad_linear_weight_error,error,timing_error
+reference,,,,4096,4096,32000,bfloat16,cuda,mean,True,False,14.06668758392334,2672034816,0.008987089820139937,0.013569963908825694,,
+accurate_aspect_ratio_fp32,accurate,aspect_ratio,float32,4096,4096,32000,bfloat16,cuda,mean,True,False,134.40818786621094,3174308352,0.001660351743441524,0.003401251985712595,,
+accurate_aspect_ratio:2_fp32,accurate,aspect_ratio:2,float32,4096,4096,32000,bfloat16,cuda,mean,True,False,148.33970642089844,3104574976,0.001660351743441524,0.004663110111226082,,
+accurate_aspect_ratio:4_fp32,accurate,aspect_ratio:4,float32,4096,4096,32000,bfloat16,cuda,mean,True,False,158.87770080566406,3069708288,0.001660351440168604,0.006488303552636046,,
+balanced_aspect_ratio_fp32,balanced,aspect_ratio,float32,4096,4096,32000,bfloat16,cuda,mean,True,False,78.94732666015625,2615679488,0.0023473473845085006,0.003401251985712595,,
+balanced_aspect_ratio:2_fp32,balanced,aspect_ratio:2,float32,4096,4096,32000,bfloat16,cuda,mean,True,False,87.46495819091797,2529562112,0.0023473473845085006,0.004663110111226082,,
+balanced_aspect_ratio:4_fp32,balanced,aspect_ratio:4,float32,4096,4096,32000,bfloat16,cuda,mean,True,False,106.33318328857422,2486503424,0.00294722923486556,0.006488303552636046,,
+compact_aspect_ratio_fp32,compact,aspect_ratio,float32,4096,4096,32000,bfloat16,cuda,mean,True,False,20.930559158325195,2214855680,0.0023473473845085006,0.0037015458613065357,,
+compact_aspect_ratio:2_fp32,compact,aspect_ratio:2,float32,4096,4096,32000,bfloat16,cuda,mean,True,False,25.06342315673828,2214855680,0.0023473473845085006,0.004886597528104506,,
+compact_aspect_ratio:4_fp32,compact,aspect_ratio:4,float32,4096,4096,32000,bfloat16,cuda,mean,True,False,35.701759338378906,2214855680,0.00294722923486556,0.006651044161694314,,
+auto_fp32,auto,aspect_ratio:2,float32,4096,4096,32000,bfloat16,cuda,mean,True,False,25.061376571655273,2214855680,0.0023473473845085006,0.004886597528104506,,

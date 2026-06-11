@@ -1,0 +1,12 @@
+label,acc_policy,chunking_method,acc_dtype,num_tokens,in_features,num_classes,dtype,device_type,reduction,prob_target,allow_retain_graph,time_ms,memory_peak_bytes,grad_input_error,grad_linear_weight_error,error,timing_error
+reference,,,,4096,4096,8192,bfloat16,cuda,mean,True,False,4.362239837646484,721683456,0.009618865199412864,0.010479205301470748,,
+accurate_aspect_ratio_fp32,accurate,aspect_ratio,float32,4096,4096,8192,bfloat16,cuda,mean,True,False,32.46284866333008,1057251840,0.0016556726724846452,0.0019941812527867267,,
+accurate_aspect_ratio:2_fp32,accurate,aspect_ratio:2,float32,4096,4096,8192,bfloat16,cuda,mean,True,False,34.01113510131836,973353472,0.0016556726724846452,0.0025482802660875483,,
+accurate_aspect_ratio:4_fp32,accurate,aspect_ratio:4,float32,4096,4096,8192,bfloat16,cuda,mean,True,False,35.41708755493164,931404288,0.0016556726724846452,0.003401924213252915,,
+balanced_aspect_ratio_fp32,balanced,aspect_ratio,float32,4096,4096,8192,bfloat16,cuda,mean,True,False,18.877439498901367,889479680,0.002369058799243771,0.0019941812527867267,,
+balanced_aspect_ratio:2_fp32,balanced,aspect_ratio:2,float32,4096,4096,8192,bfloat16,cuda,mean,True,False,19.85024070739746,788804096,0.002369058799243771,0.0025482802660875483,,
+balanced_aspect_ratio:4_fp32,balanced,aspect_ratio:4,float32,4096,4096,8192,bfloat16,cuda,mean,True,False,21.26438331604004,738466304,0.0026081660696407956,0.003401924213252915,,
+compact_aspect_ratio_fp32,compact,aspect_ratio,float32,4096,4096,8192,bfloat16,cuda,mean,True,False,6.062079906463623,755261952,0.002369058799243771,0.0024717905080882626,,
+compact_aspect_ratio:2_fp32,compact,aspect_ratio:2,float32,4096,4096,8192,bfloat16,cuda,mean,True,False,6.200319766998291,654586368,0.002369058799243771,0.0029377506248432807,,
+compact_aspect_ratio:4_fp32,compact,aspect_ratio:4,float32,4096,4096,8192,bfloat16,cuda,mean,True,False,7.546879768371582,654574592,0.0026081660696407956,0.003701841976856686,,
+auto_fp32,auto,aspect_ratio:2,float32,4096,4096,8192,bfloat16,cuda,mean,True,False,6.322175979614258,654586368,0.002369058799243771,0.0029377506248432807,,

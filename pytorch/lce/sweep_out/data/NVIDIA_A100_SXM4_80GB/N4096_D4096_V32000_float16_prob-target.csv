@@ -1,0 +1,12 @@
+label,acc_policy,chunking_method,acc_dtype,num_tokens,in_features,num_classes,dtype,device_type,reduction,prob_target,allow_retain_graph,time_ms,memory_peak_bytes,grad_input_error,grad_linear_weight_error,error,timing_error
+reference,,,,4096,4096,32000,float16,cuda,mean,True,False,13.962240219116211,2672034816,1.0041545428547436,0.8849732998159423,,
+accurate_aspect_ratio_fp32,accurate,aspect_ratio,float32,4096,4096,32000,float16,cuda,mean,True,False,134.45733642578125,3174308864,0.24060315816115446,0.04732171399507307,,
+accurate_aspect_ratio:2_fp32,accurate,aspect_ratio:2,float32,4096,4096,32000,float16,cuda,mean,True,False,148.136962890625,3104575488,0.24060315806977992,0.06693103010736597,,
+accurate_aspect_ratio:4_fp32,accurate,aspect_ratio:4,float32,4096,4096,32000,float16,cuda,mean,True,False,158.0912628173828,3069708800,0.24060315806751434,0.09465809639670245,,
+balanced_aspect_ratio_fp32,balanced,aspect_ratio,float32,4096,4096,32000,float16,cuda,mean,True,False,23.801855087280273,2484608512,0.7443497659306662,0.665226991160173,,
+balanced_aspect_ratio:2_fp32,balanced,aspect_ratio:2,float32,4096,4096,32000,float16,cuda,mean,True,False,33.03116989135742,2464026624,0.6696149714629956,0.6669101132192807,,
+balanced_aspect_ratio:4_fp32,balanced,aspect_ratio:4,float32,4096,4096,32000,float16,cuda,mean,True,False,57.169921875,2453735936,0.7443809174509428,0.6702576628496099,,
+compact_aspect_ratio_fp32,compact,aspect_ratio,float32,4096,4096,32000,float16,cuda,mean,True,False,17.43155288696289,2214855680,0.7443497659306662,0.665226991160173,,
+compact_aspect_ratio:2_fp32,compact,aspect_ratio:2,float32,4096,4096,32000,float16,cuda,mean,True,False,21.188608169555664,2214855680,0.6696149714629956,0.6669101132192807,,
+compact_aspect_ratio:4_fp32,compact,aspect_ratio:4,float32,4096,4096,32000,float16,cuda,mean,True,False,31.99897575378418,2214855680,0.7443809174509428,0.6702576628496099,,
+auto_fp32,auto,aspect_ratio:2,float32,4096,4096,32000,float16,cuda,mean,True,False,21.25926399230957,2214855680,0.6696149714629956,0.6669101132192807,,
