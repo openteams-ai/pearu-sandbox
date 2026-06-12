@@ -93,6 +93,17 @@ smaller relative savings than the index-target sweeps. CSVs/figures get
 python lce_benchmark_sweep.py --dtypes bfloat16 --device cuda --prob-target
 ```
 
+`linear_bias` (`--bias`). Adds a `(num_classes,)` bias consumed by the
+chunked path, the reference, and liger (its fused op takes a bias), plus
+a `grad_linear_bias_error` column in the grad-error check (rendered as a
+third metric in the auto-dispatch grad-error row). Composes with
+`--prob-target` and `--reduction`; CSVs/figures get `bias` / `_bias`
+suffixes:
+
+```bash
+python lce_benchmark_sweep.py --dtypes bfloat16 --device cuda --bias
+```
+
 Override the swept values for one or more axes (e.g. push num_classes
 into LLaMA-3 / Qwen3 territory):
 

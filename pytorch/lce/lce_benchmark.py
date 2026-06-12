@@ -38,11 +38,11 @@ def _liger_callable():
     except Exception:
         return None
 
-    def _liger(input, linear_weight, target, reduction="mean"):
+    def _liger(input, linear_weight, target, linear_bias=None, reduction="mean"):
         # Positional order: _input, weight, target, bias, ce_weight,
         # ignore_index, lse_square_scale, label_smoothing, reduction.
         return LigerFusedLinearCrossEntropyFunction.apply(
-            input, linear_weight, target, None, None, -100, 0.0, 0.0, reduction
+            input, linear_weight, target, linear_bias, None, -100, 0.0, 0.0, reduction
         )
 
     return _liger
@@ -198,8 +198,8 @@ def _build_configs(dtype: str, include_acc_none: bool = False) -> list[Config]:
 # Reference path (full materialization)
 # ---------------------------------------------------------------------------
 
-def _reference_forward_backward(input, linear_weight, target, reduction):
-    logits = F.linear(input, linear_weight)
+def _reference_forward_backward(input, linear_weight, target, reduction, linear_bias=None):
+    logits = F.linear(input, linear_weight, linear_bias)
     loss = F.cross_entropy(logits, target, reduction=reduction)
     if reduction == "none":
         loss.sum().backward()
@@ -209,9 +209,12 @@ def _reference_forward_backward(input, linear_weight, target, reduction):
 
 
 def _chunked_forward_backward(
-    input, linear_weight, target, reduction, options
+    input, linear_weight, target, reduction, options, linear_bias=None
 ):
-    loss = F.linear_cross_entropy(input, linear_weight, target, reduction=reduction, options=options)
+    loss = F.linear_cross_entropy(
+        input, linear_weight, target, linear_bias=linear_bias,
+        reduction=reduction, options=options,
+    )
     if reduction == "none":
         loss.sum().backward()
     else:
@@ -232,6 +235,7 @@ def _measure_in_subprocess(
     device_type: str,
     reduction: str,
     prob_target: bool,
+    bias: bool,
     config: Config,
     allow_retain_graph: bool,
     warmup: int,
@@ -247,6 +251,7 @@ def _measure_in_subprocess(
         "device_type": device_type,
         "reduction": reduction,
         "prob_target": prob_target,
+        "bias": bias,
         "label": config.label,
         "acc_policy": config.acc_policy,
         "chunking_method": config.chunking_method,
@@ -278,6 +283,7 @@ def _measure_in_subprocess(
         "device_type": device_type,
         "reduction": reduction,
         "prob_target": prob_target,
+        "bias": bias,
         "allow_retain_graph": allow_retain_graph,
     }
     if proc.returncode != 0:
@@ -322,6 +328,19 @@ def _worker_main(payload: dict) -> None:
         target = torch.softmax(torch.randn(N, V, dtype=dtype, device=device), dim=1)
     else:
         target = torch.randint(0, V, (N,), device=device)
+    bias = payload.get("bias", False)
+    linear_bias = (
+        (torch.randn(V, dtype=dtype, device=device) * (1.0 / (D ** 0.5)))
+        .detach()
+        .requires_grad_(True)
+        if bias
+        else None
+    )
+
+    def _clear_grads():
+        for t in (input, linear_weight, linear_bias):
+            if t is not None and t.grad is not None:
+                t.grad = None
 
     if label == "liger":
         liger = _liger_callable()
@@ -332,7 +351,7 @@ def _worker_main(payload: dict) -> None:
         def _liger_fwd_bwd():
             # Liger's Function.apply returns (loss, z_loss, token_accuracy);
             # we only need the loss.
-            out = liger(input, linear_weight, target, reduction=reduction)
+            out = liger(input, linear_weight, target, linear_bias, reduction=reduction)
             loss = out[0] if isinstance(out, tuple) else out
             if reduction == "none":
                 loss.sum().backward()
@@ -350,16 +369,17 @@ def _worker_main(payload: dict) -> None:
             acc_dtype=acc_dtype,
             allow_retain_graph=payload["allow_retain_graph"],
         )
-        call = lambda: _chunked_forward_backward(input, linear_weight, target, reduction, options)
+        call = lambda: _chunked_forward_backward(
+            input, linear_weight, target, reduction, options, linear_bias
+        )
     else:
-        call = lambda: _reference_forward_backward(input, linear_weight, target, reduction)
+        call = lambda: _reference_forward_backward(
+            input, linear_weight, target, reduction, linear_bias
+        )
 
     # Warmup
     for _ in range(payload["warmup"]):
-        if input.grad is not None:
-            input.grad = None
-        if linear_weight.grad is not None:
-            linear_weight.grad = None
+        _clear_grads()
         call()
         if device_type == "cuda":
             torch.cuda.synchronize()
@@ -369,6 +389,7 @@ def _worker_main(payload: dict) -> None:
     # fp64 reference wouldn't fit in available VRAM, or if any OOM occurs.
     grad_input_error = float("nan")
     grad_linear_weight_error = float("nan")
+    grad_linear_bias_error = float("nan")
     if payload["grad_error_check"]:
         try:
             if device_type == "cuda":
@@ -391,37 +412,50 @@ def _worker_main(payload: dict) -> None:
 
             # Run chunked call FIRST so its peak transient memory doesn't
             # overlap with the held fp64 reference grads.
-            if input.grad is not None:
-                input.grad = None
-            if linear_weight.grad is not None:
-                linear_weight.grad = None
+            _clear_grads()
             call()
             gi = input.grad.detach().to(torch.float64) if input.grad is not None else None
             gw = linear_weight.grad.detach().to(torch.float64) if linear_weight.grad is not None else None
+            gb = (
+                linear_bias.grad.detach().to(torch.float64)
+                if linear_bias is not None and linear_bias.grad is not None
+                else None
+            )
 
             ref_input = input.detach().to(torch.float64).requires_grad_(True)
             ref_weight = linear_weight.detach().to(torch.float64).requires_grad_(True)
+            ref_bias = (
+                linear_bias.detach().to(torch.float64).requires_grad_(True)
+                if linear_bias is not None
+                else None
+            )
             # fp64 target for a probability target (lossless upcast);
             # index targets stay int64.
             ref_target = target.to(torch.float64) if prob_target else target
-            ref_loss = F.cross_entropy(F.linear(ref_input, ref_weight), ref_target, reduction=reduction)
+            ref_loss = F.cross_entropy(
+                F.linear(ref_input, ref_weight, ref_bias), ref_target, reduction=reduction
+            )
             if reduction == "none":
                 ref_loss.sum().backward()
             else:
                 ref_loss.backward()
             ref_gi = ref_input.grad
             ref_gw = ref_weight.grad
+            ref_gb = ref_bias.grad if ref_bias is not None else None
 
             if gi is not None and ref_gi is not None:
                 grad_input_error = float((gi - ref_gi).norm() / (ref_gi.norm() + 1e-30))
             if gw is not None and ref_gw is not None:
                 grad_linear_weight_error = float((gw - ref_gw).norm() / (ref_gw.norm() + 1e-30))
+            if gb is not None and ref_gb is not None:
+                grad_linear_bias_error = float((gb - ref_gb).norm() / (ref_gb.norm() + 1e-30))
 
             # ref_target included: for a probability target it is an
             # (N, V) fp64 tensor that would otherwise stay alive (as a
             # function-scope local) through the memory phase, inflating
             # every config's measured peak by N*V*8 bytes.
-            del ref_input, ref_weight, ref_target, ref_loss, ref_gi, ref_gw, gi, gw
+            del ref_input, ref_weight, ref_bias, ref_target, ref_loss
+            del ref_gi, ref_gw, ref_gb, gi, gw, gb
         except torch.OutOfMemoryError:
             pass
         finally:
@@ -442,10 +476,7 @@ def _worker_main(payload: dict) -> None:
         # monitor so the peak isn't biased by warmup-cached blocks the
         # in-call allocations would invisibly slot into.
         try:
-            if input.grad is not None:
-                input.grad = None
-            if linear_weight.grad is not None:
-                linear_weight.grad = None
+            _clear_grads()
             with _CUDAPeakMonitor() as mem:
                 call()
             memory_peak_bytes = mem.peak_bytes
@@ -460,10 +491,7 @@ def _worker_main(payload: dict) -> None:
             events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
             try:
                 for _ in range(payload["iters"]):
-                    if input.grad is not None:
-                        input.grad = None
-                    if linear_weight.grad is not None:
-                        linear_weight.grad = None
+                    _clear_grads()
                     start_ev = torch.cuda.Event(enable_timing=True)
                     end_ev = torch.cuda.Event(enable_timing=True)
                     start_ev.record()
@@ -481,10 +509,7 @@ def _worker_main(payload: dict) -> None:
             gc.collect()
             with _RSSPeakMonitor() as mem:
                 for _ in range(payload["iters"]):
-                    if input.grad is not None:
-                        input.grad = None
-                    if linear_weight.grad is not None:
-                        linear_weight.grad = None
+                    _clear_grads()
                     t0 = time.perf_counter()
                     call()
                     times_ms.append(1000.0 * (time.perf_counter() - t0))
@@ -511,6 +536,7 @@ def _worker_main(payload: dict) -> None:
         "memory_peak_bytes": memory_peak_bytes_out,
         "grad_input_error": grad_input_error,
         "grad_linear_weight_error": grad_linear_weight_error,
+        "grad_linear_bias_error": grad_linear_bias_error,
         "num_tokens": N,
         "in_features": D,
         "num_classes": V,
@@ -518,6 +544,7 @@ def _worker_main(payload: dict) -> None:
         "device_type": device_type,
         "reduction": reduction,
         "prob_target": prob_target,
+        "bias": bias,
         "allow_retain_graph": payload["allow_retain_graph"],
     }
     if timing_error is not None:
@@ -545,6 +572,14 @@ def _parse_args():
         "input dtype instead of class indices. Requires reduction mean/sum "
         "(the chunked path falls back on none). The liger baseline is "
         "skipped (index targets only).",
+    )
+    p.add_argument(
+        "--bias",
+        action="store_true",
+        help="add a linear_bias of shape (num_classes,); exercised by the "
+        "chunked path, the reference, and liger (its fused op takes a "
+        "bias). Adds a grad_linear_bias_error column to the grad-error "
+        "check.",
     )
     p.add_argument("--allow-retain-graph", action="store_true")
     p.add_argument(
@@ -609,6 +644,7 @@ def main() -> int:
                 device_type=device_type,
                 reduction=args.reduction,
                 prob_target=args.prob_target,
+                bias=args.bias,
                 config=cfg,
                 allow_retain_graph=args.allow_retain_graph,
                 warmup=args.warmup,
@@ -637,11 +673,13 @@ def main() -> int:
             "device_type",
             "reduction",
             "prob_target",
+            "bias",
             "allow_retain_graph",
             "time_ms",
             "memory_peak_bytes",
             "grad_input_error",
             "grad_linear_weight_error",
+            "grad_linear_bias_error",
             "error",
             "timing_error",
         ]

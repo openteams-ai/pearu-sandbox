@@ -84,7 +84,7 @@ def _load_rows(csv_path: Path) -> list[dict]:
                 continue
             for k in ("num_tokens", "in_features", "num_classes"):
                 r[k] = int(r[k])
-            for k in ("time_ms", "memory_peak_bytes", "grad_input_error", "grad_linear_weight_error"):
+            for k in ("time_ms", "memory_peak_bytes", "grad_input_error", "grad_linear_weight_error", "grad_linear_bias_error"):
                 v = r.get(k)
                 if v in (None, ""):
                     r[k] = float("nan")
@@ -163,7 +163,8 @@ def _pick_focus_labels(rows: list[dict]) -> list[str]:
 YROWS = [
     ("time_ms", "time (ms)", False, None),
     ("memory_peak_gb", "peak memory (GiB)", False, None),
-    (None, "gradient rel error", True, ("grad_linear_weight_error", "grad_input_error")),
+    (None, "gradient rel error", True,
+     ("grad_linear_weight_error", "grad_input_error", "grad_linear_bias_error")),
 ]
 
 
@@ -238,7 +239,8 @@ def _plot_group(
             else:
                 # Merged: per-(series, metric) markers; same color per
                 # series so the two metrics of one config are visibly tied.
-                markers = ("o", "s")
+                markers = ("o", "s", "^")
+                linestyles = ("-", "--", ":")
                 for lbl in labels:
                     xs = by_label.get(lbl, [])
                     if not xs:
@@ -254,7 +256,7 @@ def _plot_group(
                             xvals,
                             ys,
                             marker=markers[mi],
-                            linestyle="-" if mi == 0 else "--",
+                            linestyle=linestyles[mi],
                             label=f"{lbl} ({metric})",
                             linewidth=1,
                             color=color,
@@ -277,14 +279,21 @@ def _plot_group(
             if merged is not None and col == 0:
                 from matplotlib.lines import Line2D
 
+                # Only legend metrics with data in this group (e.g. the
+                # bias-grad metric is all-NaN on bias-less sweeps).
                 marker_handles = [
                     Line2D(
                         [0], [0],
                         color="gray", marker=markers[mi],
-                        linestyle="-" if mi == 0 else "--",
+                        linestyle=linestyles[mi],
                         label=metric.replace("grad_", "").replace("_error", "") + " grad",
                     )
                     for mi, metric in enumerate(merged)
+                    if any(
+                        x.get(metric, float("nan")) == x.get(metric, float("nan"))
+                        for xs in by_label.values()
+                        for x in xs
+                    )
                 ]
                 ax.legend(
                     handles=marker_handles, fontsize=6, loc="lower right",
@@ -342,7 +351,7 @@ def main() -> int:
 
     # Group by (dtype, device, reduction, prob_target) so globbing all
     # CSVs doesn't mix variant rows in one figure.
-    grouped: dict[tuple[str, str, str, bool], list[dict]] = defaultdict(list)
+    grouped: dict[tuple[str, str, str, bool, bool], list[dict]] = defaultdict(list)
     for p in csv_paths:
         rows = _load_rows(p)
         for r in rows:
@@ -354,13 +363,15 @@ def main() -> int:
             reduction = r.get("reduction") or "mean"
             # Older CSVs have no prob_target column; treat as index targets.
             prob = r.get("prob_target") in (True, "True")
-            grouped[(dtype, device_name, reduction, prob)].append(r)
+            has_bias = r.get("bias") in (True, "True")
+            grouped[(dtype, device_name, reduction, prob, has_bias)].append(r)
 
-    for (dtype, device_name, reduction, prob), rows in grouped.items():
+    for (dtype, device_name, reduction, prob, has_bias), rows in grouped.items():
         group_label = (
             f"{dtype}_{device_name}"
             + ("" if reduction == "mean" else f"_{reduction}")
             + ("_prob" if prob else "")
+            + ("_bias" if has_bias else "")
         )
         _plot_group(out_dir, rows, group_label)
 

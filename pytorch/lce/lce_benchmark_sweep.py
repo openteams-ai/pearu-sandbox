@@ -96,6 +96,7 @@ def _csv_path(
     allow_retain_graph: bool = False,
     reduction: str = "mean",
     prob_target: bool = False,
+    bias: bool = False,
 ) -> Path:
     parts = [
         f"N{point['num_tokens']}",
@@ -107,6 +108,8 @@ def _csv_path(
         parts.append(f"reduction-{reduction}")
     if prob_target:
         parts.append("prob-target")
+    if bias:
+        parts.append("bias")
     if allow_retain_graph:
         parts.append("retain-graph")
     stem = "_".join(parts)
@@ -125,6 +128,7 @@ def _run_point(
     device_slug: str,
     reduction: str,
     prob_target: bool,
+    bias: bool,
     allow_retain_graph: bool,
     include_acc_none: bool,
     out_dir: Path,
@@ -132,7 +136,7 @@ def _run_point(
     iters: int,
     force: bool,
 ) -> Path:
-    csv_path = _csv_path(out_dir, point, dtype, device_slug, allow_retain_graph, reduction, prob_target)
+    csv_path = _csv_path(out_dir, point, dtype, device_slug, allow_retain_graph, reduction, prob_target, bias)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     if csv_path.exists() and not force:
         return csv_path
@@ -154,6 +158,8 @@ def _run_point(
     ]
     if prob_target:
         cmd.append("--prob-target")
+    if bias:
+        cmd.append("--bias")
     if allow_retain_graph:
         cmd.append("--allow-retain-graph")
     if include_acc_none:
@@ -337,6 +343,12 @@ def _parse_args():
         help="benchmark with a probability (soft-label) target; requires "
         "reduction mean/sum, no liger baseline (index targets only)",
     )
+    p.add_argument(
+        "--bias",
+        action="store_true",
+        help="benchmark with a (num_classes,) linear_bias (chunked, "
+        "reference, and liger all consume it)",
+    )
     p.add_argument("--allow-retain-graph", action="store_true")
     p.add_argument(
         "--include-acc-none",
@@ -421,7 +433,7 @@ def main() -> int:
                     csv_paths.append(
                         _csv_path(data_dir, point, dtype, device_slug,
                                   args.allow_retain_graph, args.reduction,
-                                  args.prob_target)
+                                  args.prob_target, args.bias)
                     )
                 else:
                     path = _run_point(
@@ -431,6 +443,7 @@ def main() -> int:
                         device_slug=device_slug,
                         reduction=args.reduction,
                         prob_target=args.prob_target,
+                        bias=args.bias,
                         allow_retain_graph=args.allow_retain_graph,
                         include_acc_none=args.include_acc_none,
                         out_dir=data_dir,
@@ -443,7 +456,7 @@ def main() -> int:
     # Group plots by (dtype, device, reduction, prob_target) so variant
     # sweeps don't clobber or mix with the index-target 'mean' figures
     # (their CSVs are separate files).
-    grouped: dict[tuple[str, str, str, bool], list[Path]] = defaultdict(list)
+    grouped: dict[tuple[str, str, str, bool, bool], list[Path]] = defaultdict(list)
     for p in csv_paths:
         if not p.exists():
             continue
@@ -454,14 +467,16 @@ def main() -> int:
         reduction = rows[0].get("reduction") or "mean"
         # Older CSVs have no prob_target column; treat as index targets.
         prob = rows[0].get("prob_target") in (True, "True")
-        grouped[(dtype, device_name, reduction, prob)].append(p)
+        has_bias = rows[0].get("bias") in (True, "True")
+        grouped[(dtype, device_name, reduction, prob, has_bias)].append(p)
 
-    for (dtype, dev_name, reduction, prob), paths in grouped.items():
+    for (dtype, dev_name, reduction, prob, has_bias), paths in grouped.items():
         # Keep the index-target 'mean' figure name unchanged; suffix others.
         group_label = (
             f"{dtype}_{dev_name}"
             + ("" if reduction == "mean" else f"_{reduction}")
             + ("_prob" if prob else "")
+            + ("_bias" if has_bias else "")
         )
         _plot(out_dir, paths, group_label, include_acc_none=args.include_acc_none)
 
