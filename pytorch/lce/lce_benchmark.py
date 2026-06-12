@@ -182,10 +182,15 @@ def _build_configs(dtype: str, include_acc_none: bool = False) -> list[Config]:
                 cfgs.append(
                     Config(f"{policy}_{cm}_fp32", policy, cm, acc_dtype="float32")
                 )
+    # chunking_method="auto" so the auto rows track the real zero-arg
+    # default resolution, which is target-kind dependent since
+    # pytorch/pytorch#187053 (prob targets on CUDA resolve to
+    # aspect_ratio factor 1, index targets to :2) -- hardcoding ":2"
+    # would silently measure a non-default config for prob targets.
     if emit_acc_none:
-        cfgs.append(Config("auto", "auto", "aspect_ratio:2"))
+        cfgs.append(Config("auto", "auto", "auto"))
     if fp32_acc:
-        cfgs.append(Config("auto_fp32", "auto", "aspect_ratio:2", acc_dtype="float32"))
+        cfgs.append(Config("auto_fp32", "auto", "auto", acc_dtype="float32"))
     return cfgs
 
 
@@ -412,7 +417,11 @@ def _worker_main(payload: dict) -> None:
             if gw is not None and ref_gw is not None:
                 grad_linear_weight_error = float((gw - ref_gw).norm() / (ref_gw.norm() + 1e-30))
 
-            del ref_input, ref_weight, ref_loss, ref_gi, ref_gw, gi, gw
+            # ref_target included: for a probability target it is an
+            # (N, V) fp64 tensor that would otherwise stay alive (as a
+            # function-scope local) through the memory phase, inflating
+            # every config's measured peak by N*V*8 bytes.
+            del ref_input, ref_weight, ref_target, ref_loss, ref_gi, ref_gw, gi, gw
         except torch.OutOfMemoryError:
             pass
         finally:
