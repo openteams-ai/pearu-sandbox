@@ -1,0 +1,13 @@
+label,acc_policy,chunking_method,num_tokens,in_features,num_classes,dtype,device_type,reduction,allow_retain_graph,time_ms,memory_peak_bytes,grad_input_error,grad_linear_weight_error,error,timing_error
+reference,,,4096,4096,65536,bfloat16,cuda,mean,False,1528.640248987358,1577059328,nan,nan,,
+accurate_aspect_ratio,accurate,aspect_ratio,4096,4096,65536,bfloat16,cuda,mean,False,1662.5872289878316,572569088,nan,nan,,
+accurate_aspect_ratio:2,accurate,aspect_ratio:2,4096,4096,65536,bfloat16,cuda,mean,False,1766.6243839776143,570426368,nan,nan,,
+accurate_aspect_ratio:4,accurate,aspect_ratio:4,4096,4096,65536,bfloat16,cuda,mean,False,1988.6065959581174,570426368,nan,nan,,
+balanced_aspect_ratio,balanced,aspect_ratio,4096,4096,65536,bfloat16,cuda,mean,False,1667.211419029627,572569088,nan,nan,,
+balanced_aspect_ratio:2,balanced,aspect_ratio:2,4096,4096,65536,bfloat16,cuda,mean,False,1767.7841740078293,570426368,nan,nan,,
+balanced_aspect_ratio:4,balanced,aspect_ratio:4,4096,4096,65536,bfloat16,cuda,mean,False,1993.1952289771289,570426368,nan,nan,,
+compact_aspect_ratio,compact,aspect_ratio,4096,4096,65536,bfloat16,cuda,mean,False,1634.0433669975027,570426368,nan,nan,,
+compact_aspect_ratio:2,compact,aspect_ratio:2,4096,4096,65536,bfloat16,cuda,mean,False,1691.155707987491,570426368,nan,nan,,
+compact_aspect_ratio:4,compact,aspect_ratio:4,4096,4096,65536,bfloat16,cuda,mean,False,1878.1640499946661,570426368,nan,nan,,
+auto,auto,aspect_ratio:2,4096,4096,65536,bfloat16,cuda,mean,False,1694.7896990459412,570426368,nan,nan,,
+liger,,,4096,4096,65536,bfloat16,cuda,mean,False,1779.6138559933752,2214612992,nan,nan,,
