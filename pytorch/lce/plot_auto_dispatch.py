@@ -153,6 +153,20 @@ def _pick_focus_labels(rows: list[dict]) -> list[str]:
 
     _neighbors_for("auto", False)
     _neighbors_for("auto_fp32", True)
+
+    # Pull in the budget line matching each auto variant's policy. auto
+    # switches to budget above the crossing region, so showing the explicit
+    # budget config alongside the aspect_ratio neighbors lets the figure
+    # contrast the bounded budget memory with the aspect_ratio runaway.
+    for auto_label, suffix in (("auto", ""), ("auto_fp32", "_fp32")):
+        for r in rows:
+            if r["label"] != auto_label:
+                continue
+            policy = (r.get("acc_policy") or "").strip()
+            lbl = f"{policy}_budget{suffix}"
+            if policy and lbl in have and lbl not in focus:
+                focus.append(lbl)
+            break
     return focus
 
 

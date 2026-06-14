@@ -174,8 +174,12 @@ def _build_configs(dtype: str, include_acc_none: bool = False) -> list[Config]:
     cfgs: list[Config] = [Config("reference", None, None, use_chunked=False)]
     fp32_acc = dtype in ("float16", "bfloat16")
     emit_acc_none = include_acc_none or not fp32_acc
+    # ``budget`` (the method auto switches to above the crossing region,
+    # pytorch/pytorch#187219-followup) alongside the aspect_ratio factors,
+    # so the D-heavy sweep can contrast the aspect_ratio runaway with the
+    # bounded budget line.
     for policy in ("accurate", "balanced", "compact"):
-        for cm in ("aspect_ratio", "aspect_ratio:2", "aspect_ratio:4"):
+        for cm in ("aspect_ratio", "aspect_ratio:2", "aspect_ratio:4", "budget"):
             if emit_acc_none:
                 cfgs.append(Config(f"{policy}_{cm}", policy, cm))
             if fp32_acc:
