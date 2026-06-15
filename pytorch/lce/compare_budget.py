@@ -41,6 +41,7 @@ _THIS_DIR = Path(__file__).resolve().parent
 # Labels to overlay. reference/liger are the unchanged controls; auto_fp32 is
 # the line the PR moves (aspect_ratio below the crossing, budget above).
 FOCUS = ["reference", "liger", "auto_fp32"]
+FOCUS_NO_LIGER = ["reference", "auto_fp32"]
 YROWS = [
     ("memory_peak_gb", "peak memory (GiB)", False),
     ("time_ms", "time (ms)", False),
@@ -66,6 +67,9 @@ def main() -> int:
     p.add_argument("--before-subdir", default="data-before")
     p.add_argument("--after-subdir", default="data")
     p.add_argument("--dtype", default="float16")
+    p.add_argument("--no-liger", action="store_true",
+                   help="drop liger so the y-axis zooms to the reference/budget regime "
+                   "where the crossing is visible")
     p.add_argument(
         "--device-slug",
         default=None,
@@ -74,6 +78,7 @@ def main() -> int:
     )
     args = p.parse_args()
 
+    focus = FOCUS_NO_LIGER if args.no_liger else FOCUS
     out_dir = Path(args.out_dir)
     slug = args.device_slug or _local_device_slug()[1]
     runs = {}
@@ -112,7 +117,7 @@ def main() -> int:
                 by_label: dict[str, list[dict]] = defaultdict(list)
                 for r in slab:
                     by_label[r["label"]].append(r)
-                for label in FOCUS:
+                for label in focus:
                     xs = sorted(by_label.get(label, []), key=lambda r: r[axis])
                     if not xs:
                         continue
