@@ -1,16 +1,64 @@
 label,acc_policy,chunking_method,acc_dtype,num_tokens,in_features,num_classes,dtype,device_type,reduction,prob_target,bias,allow_retain_graph,time_ms,memory_peak_bytes,grad_input_error,grad_linear_weight_error,grad_linear_bias_error,error,timing_error
-reference,,,,4096,16384,32000,float16,cuda,mean,False,False,False,47.440895080566406,2906948608,0.011670905169631481,0.006809793361657166,nan,,
-accurate_aspect_ratio_fp32,accurate,aspect_ratio,float32,4096,16384,32000,float16,cuda,mean,False,False,False,479.67437744140625,7241831424,0.009021611347988236,0.00036933750944634515,nan,,
-accurate_aspect_ratio:2_fp32,accurate,aspect_ratio:2,float32,4096,16384,32000,float16,cuda,mean,False,False,False,489.57952880859375,7043642368,0.00902161134086124,0.0005031114765959049,nan,,
-accurate_aspect_ratio:4_fp32,accurate,aspect_ratio:4,float32,4096,16384,32000,float16,cuda,mean,False,False,False,505.06036376953125,6944547840,0.009021611341981808,0.0006971864465251051,nan,,
-accurate_budget_fp32,accurate,budget,float32,4096,16384,32000,float16,cuda,mean,False,False,False,509.34783935546875,6979579392,0.009021611341981808,0.0006093126711251118,nan,,
-balanced_aspect_ratio_fp32,balanced,aspect_ratio,float32,4096,16384,32000,float16,cuda,mean,False,False,False,59.914241790771484,4812280320,0.01424402724803953,0.006839699852468015,nan,,
-balanced_aspect_ratio:2_fp32,balanced,aspect_ratio:2,float32,4096,16384,32000,float16,cuda,mean,False,False,False,68.34585571289062,4646072832,0.015012501676620882,0.006848219644612641,nan,,
-balanced_aspect_ratio:4_fp32,balanced,aspect_ratio:4,float32,4096,16384,32000,float16,cuda,mean,False,False,False,84.5475845336914,4562969088,0.014835516903550108,0.0068651136606637814,nan,,
-balanced_budget_fp32,balanced,budget,float32,4096,16384,32000,float16,cuda,mean,False,False,False,72.61901092529297,4648022016,0.014389310032986668,0.006848275828721015,nan,,
-compact_aspect_ratio_fp32,compact,aspect_ratio,float32,4096,16384,32000,float16,cuda,mean,False,False,False,53.62995147705078,2715128320,0.01424402724803953,0.006840664079973534,nan,,
-compact_aspect_ratio:2_fp32,compact,aspect_ratio:2,float32,4096,16384,32000,float16,cuda,mean,False,False,False,55.618560791015625,2548920832,0.015012501676620882,0.006849217726159908,nan,,
-compact_aspect_ratio:4_fp32,compact,aspect_ratio:4,float32,4096,16384,32000,float16,cuda,mean,False,False,False,60.27366256713867,2465817088,0.014835516903550108,0.0068660861362365615,nan,,
-compact_budget_fp32,compact,budget,float32,4096,16384,32000,float16,cuda,mean,False,False,False,59.4442253112793,2550870016,0.014389310032986668,0.00684927684511538,nan,,
-auto_fp32,auto,auto,float32,4096,16384,32000,float16,cuda,mean,False,False,False,59.646976470947266,2550870016,0.014389310032986668,0.006849278384557941,nan,,
-liger,,,,4096,16384,32000,float16,cuda,mean,False,False,False,59.35747146606445,5659480064,0.011672468330688262,0.0068164847221833065,nan,,
+reference,,,,4096,16384,32000,float16,cuda,mean,False,False,False,47.41939163208008,2906948608,0.011670905169631481,0.006809793361657166,nan,,
+accurate_aspect_ratio_fp32,accurate,aspect_ratio,float32,4096,16384,32000,float16,cuda,mean,False,False,False,479.7184143066406,7241831424,0.009021611347988236,0.0003693374676704762,nan,,
+accurate_aspect_ratio:2_fp32,accurate,aspect_ratio:2,float32,4096,16384,32000,float16,cuda,mean,False,False,False,489.60614013671875,7043642368,0.00902161134086124,0.0005031114765959049,nan,,
+accurate_aspect_ratio:4_fp32,accurate,aspect_ratio:4,float32,4096,16384,32000,float16,cuda,mean,False,False,False,505.0163269042969,6944547840,0.009021611341981808,0.0006971864465251051,nan,,
+accurate_budget_fp32,accurate,budget,float32,4096,16384,32000,float16,cuda,mean,False,False,False,,,,,,"Traceback (most recent call last):
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 702, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 608, in main
+    _worker_main(json.loads(args.worker))
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 370, in _worker_main
+    options = LinearCrossEntropyOptions(
+        acc_policy=payload[""acc_policy""],
+    ...<2 lines>...
+        allow_retain_graph=payload[""allow_retain_graph""],
+    )
+  File ""<string>"", line 8, in __init__
+  File ""/home/pearu/git/pytorch/pytorch/torch/nn/modules/linear_cross_entropy_options.py"", line 154, in __post_init__
+    raise ValueError(f""invalid chunking_method: {self.chunking_method!r}"")
+ValueError: invalid chunking_method: 'budget'",
+balanced_aspect_ratio_fp32,balanced,aspect_ratio,float32,4096,16384,32000,float16,cuda,mean,False,False,False,60.016639709472656,4812280320,0.01424402724803953,0.006839699852468015,nan,,
+balanced_aspect_ratio:2_fp32,balanced,aspect_ratio:2,float32,4096,16384,32000,float16,cuda,mean,False,False,False,68.34073638916016,4646072832,0.015012501676620882,0.006848219644612641,nan,,
+balanced_aspect_ratio:4_fp32,balanced,aspect_ratio:4,float32,4096,16384,32000,float16,cuda,mean,False,False,False,84.54246520996094,4562969088,0.014835516903550108,0.0068651136606637814,nan,,
+balanced_budget_fp32,balanced,budget,float32,4096,16384,32000,float16,cuda,mean,False,False,False,,,,,,"Traceback (most recent call last):
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 702, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 608, in main
+    _worker_main(json.loads(args.worker))
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 370, in _worker_main
+    options = LinearCrossEntropyOptions(
+        acc_policy=payload[""acc_policy""],
+    ...<2 lines>...
+        allow_retain_graph=payload[""allow_retain_graph""],
+    )
+  File ""<string>"", line 8, in __init__
+  File ""/home/pearu/git/pytorch/pytorch/torch/nn/modules/linear_cross_entropy_options.py"", line 154, in __post_init__
+    raise ValueError(f""invalid chunking_method: {self.chunking_method!r}"")
+ValueError: invalid chunking_method: 'budget'",
+compact_aspect_ratio_fp32,compact,aspect_ratio,float32,4096,16384,32000,float16,cuda,mean,False,False,False,53.393409729003906,2715128320,0.01424402724803953,0.006840662604133502,nan,,
+compact_aspect_ratio:2_fp32,compact,aspect_ratio:2,float32,4096,16384,32000,float16,cuda,mean,False,False,False,55.51001739501953,2548920832,0.015012501676620882,0.006849216902048818,nan,,
+compact_aspect_ratio:4_fp32,compact,aspect_ratio:4,float32,4096,16384,32000,float16,cuda,mean,False,False,False,60.1446418762207,2465817088,0.014835516903550108,0.006866086586738114,nan,,
+compact_budget_fp32,compact,budget,float32,4096,16384,32000,float16,cuda,mean,False,False,False,,,,,,"Traceback (most recent call last):
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 702, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 608, in main
+    _worker_main(json.loads(args.worker))
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 370, in _worker_main
+    options = LinearCrossEntropyOptions(
+        acc_policy=payload[""acc_policy""],
+    ...<2 lines>...
+        allow_retain_graph=payload[""allow_retain_graph""],
+    )
+  File ""<string>"", line 8, in __init__
+  File ""/home/pearu/git/pytorch/pytorch/torch/nn/modules/linear_cross_entropy_options.py"", line 154, in __post_init__
+    raise ValueError(f""invalid chunking_method: {self.chunking_method!r}"")
+ValueError: invalid chunking_method: 'budget'",
+auto_fp32,auto,auto,float32,4096,16384,32000,float16,cuda,mean,False,False,False,55.61548614501953,2548920832,0.015012501676620882,0.006849217335337491,nan,,
+liger,,,,4096,16384,32000,float16,cuda,mean,False,False,False,59.330078125,5659480064,0.011672468330688262,0.0068164847221833065,nan,,
