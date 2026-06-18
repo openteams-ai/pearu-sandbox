@@ -84,34 +84,41 @@ def _chunk_sizes(num_tokens: int) -> list[int]:
 # Worker: one (shape, B) point in an isolated subprocess
 # ---------------------------------------------------------------------------
 
+def _make_inputs(N: int, D: int, V: int, dtype, device):
+    input = torch.randn(N, D, dtype=dtype, device=device, requires_grad=True)
+    linear_weight = (
+        torch.randn(V, D, dtype=dtype, device=device) * (1.0 / (D ** 0.5))
+    ).detach().requires_grad_(True)
+    target = torch.randint(0, V, (N,), device=device)
+    return input, linear_weight, target
+
+
+def _make_call(payload: dict, input, linear_weight, target):
+    reduction = payload["reduction"]
+    if payload["mode"] == "reference":
+        return lambda: _reference_forward_backward(input, linear_weight, target, reduction)
+    from torch.nn import LinearCrossEntropyOptions
+
+    # chunking_method=None disables the heuristic and uses our explicit B,
+    # so this never exercises the budget/auto resolution code.
+    options = LinearCrossEntropyOptions(
+        acc_policy=payload["acc_policy"],
+        chunking_method=None,
+        batch_chunk_size=payload["batch_chunk_size"],
+        acc_dtype=torch.float32,
+    )
+    return lambda: _chunked_forward_backward(input, linear_weight, target, reduction, options)
+
+
 def _worker(payload: dict) -> None:
     torch.manual_seed(payload["seed"])
     dtype = _DTYPE_MAP[payload["dtype"]]
     device_type = payload["device_type"]
     device = torch.device("cuda") if device_type == "cuda" else torch.device("cpu")
     N, D, V = payload["num_tokens"], payload["in_features"], payload["num_classes"]
-    reduction = payload["reduction"]
 
-    input = torch.randn(N, D, dtype=dtype, device=device, requires_grad=True)
-    linear_weight = (
-        torch.randn(V, D, dtype=dtype, device=device) * (1.0 / (D ** 0.5))
-    ).detach().requires_grad_(True)
-    target = torch.randint(0, V, (N,), device=device)
-
-    if payload["mode"] == "reference":
-        call = lambda: _reference_forward_backward(input, linear_weight, target, reduction)
-    else:
-        from torch.nn import LinearCrossEntropyOptions
-
-        # chunking_method=None disables the heuristic and uses our explicit B,
-        # so this never exercises the budget/auto resolution code.
-        options = LinearCrossEntropyOptions(
-            acc_policy=payload["acc_policy"],
-            chunking_method=None,
-            batch_chunk_size=payload["batch_chunk_size"],
-            acc_dtype=torch.float32,
-        )
-        call = lambda: _chunked_forward_backward(input, linear_weight, target, reduction, options)
+    input, linear_weight, target = _make_inputs(N, D, V, dtype, device)
+    call = _make_call(payload, input, linear_weight, target)
 
     def _clear():
         for t in (input, linear_weight):
@@ -188,6 +195,98 @@ def _run_point(payload: dict) -> dict:
         return {**ident, **json.loads(proc.stdout.strip().splitlines()[-1])}
     except Exception as e:
         return {**ident, "error": f"parse failed: {e!r}"}
+
+
+# ---------------------------------------------------------------------------
+# Profile: per-aten-op CUDA self-time, bucketed (GEMM vs softmax/elementwise)
+# ---------------------------------------------------------------------------
+
+def _bucket(name: str) -> str:
+    low = name.lower()
+    if any(g in low for g in ("::mm", "::addmm", "::bmm")):
+        return "GEMM"
+    if "index" in low or "gather" in low or "scatter" in low:
+        return "gather/scatter"
+    return "elementwise/reduction"
+
+
+def _profile_worker(payload: dict) -> None:
+    from torch.profiler import ProfilerActivity, profile
+
+    torch.manual_seed(payload["seed"])
+    dtype = _DTYPE_MAP[payload["dtype"]]
+    device = torch.device("cuda")
+    N, D, V = payload["num_tokens"], payload["in_features"], payload["num_classes"]
+    input, linear_weight, target = _make_inputs(N, D, V, dtype, device)
+    call = _make_call(payload, input, linear_weight, target)
+
+    def _clear():
+        for t in (input, linear_weight):
+            t.grad = None
+
+    for _ in range(payload["warmup"]):
+        _clear()
+        call()
+        torch.cuda.synchronize()
+
+    _clear()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        for _ in range(payload["iters"]):
+            _clear()
+            call()
+        torch.cuda.synchronize()
+
+    def dev_us(e) -> float:
+        # microseconds; newer torch renames self_cuda_time_total -> self_device_time_total
+        return float(getattr(e, "self_device_time_total", 0) or getattr(e, "self_cuda_time_total", 0) or 0)
+
+    buckets: dict[str, float] = defaultdict(float)
+    rows = []
+    total = 0.0
+    for e in prof.key_averages():
+        # Sum CUDA self-time over aten ops only: 'self' excludes children, so
+        # summing over the aten layer is the total GPU time with no double count
+        # (kernel-name rows would double-count the same time).
+        if not e.key.startswith("aten::"):
+            continue
+        t = dev_us(e)
+        if t <= 0:
+            continue
+        b = _bucket(e.key)
+        buckets[b] += t
+        total += t
+        rows.append((t, e.key, b))
+
+    print(f"shape N{N} D{D} V{V} {payload['dtype']} B={payload['batch_chunk_size']} "
+          f"policy={payload['acc_policy']} mode={payload['mode']}  ({payload['iters']} iters)")
+    if total <= 0:
+        print("no CUDA self-time captured (is this a CUDA build?)")
+        return
+    print(f"total CUDA self-time over aten ops: {total / 1000:.2f} ms\n")
+    print("bucket breakdown:")
+    for b, t in sorted(buckets.items(), key=lambda kv: -kv[1]):
+        print(f"  {b:>24}: {t / 1000:>9.3f} ms  {100 * t / total:>5.1f}%")
+    print("\ntop aten ops by CUDA self-time:")
+    for t, name, b in sorted(rows, reverse=True)[:12]:
+        print(f"  {name:>26} [{b:>12}]: {t / 1000:>9.3f} ms  {100 * t / total:>5.1f}%")
+
+
+def run_profile(args) -> int:
+    if not torch.cuda.is_available():
+        print("profile mode needs CUDA", file=sys.stderr)
+        return 1
+    N, D, V = args.profile_shape
+    payload = {
+        "num_tokens": N, "in_features": D, "num_classes": V,
+        "dtype": args.dtypes[0], "device_type": "cuda", "reduction": args.reduction,
+        "acc_policy": args.acc_policy, "warmup": args.warmup, "iters": args.iters,
+        "seed": args.seed, "mode": "chunked", "batch_chunk_size": args.profile_b,
+    }
+    proc = subprocess.run(
+        [sys.executable, __file__, "--profile-worker", json.dumps(payload)],
+        text=True,
+    )
+    return proc.returncode
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +552,12 @@ def _plot(by_shape: dict, out: Path, tol: float) -> None:
 def _parse():
     p = argparse.ArgumentParser()
     p.add_argument("--worker", default=None, help="(internal)")
+    p.add_argument("--profile-worker", default=None, help="(internal)")
+    p.add_argument("--profile", action="store_true",
+                   help="profile one fwd+bwd and bucket CUDA self-time by aten op")
+    p.add_argument("--profile-shape", nargs=3, type=int, default=[8192, 32768, 16384],
+                   metavar=("N", "D", "V"), help="shape to profile (budget regime)")
+    p.add_argument("--profile-b", type=int, default=2048, help="batch_chunk_size to profile")
     p.add_argument("--out", default=str(_THIS_DIR / "chunk_size_sweep.csv"))
     p.add_argument("--dtypes", nargs="+", default=["bfloat16"])
     p.add_argument("--acc-policy", default="compact",
@@ -477,6 +582,11 @@ def main() -> int:
     if args.worker is not None:
         _worker(json.loads(args.worker))
         return 0
+    if args.profile_worker is not None:
+        _profile_worker(json.loads(args.profile_worker))
+        return 0
+    if args.profile:
+        return run_profile(args)
     if args.analyze:
         return analyze(args)
     return measure(args)

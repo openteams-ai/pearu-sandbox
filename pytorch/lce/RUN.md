@@ -37,6 +37,16 @@ python chunk_size_sweep.py --out chunk_size_sweep.csv --dtypes bfloat16 --analyz
 Prints, in order: the per-shape knee table (`B_knee`, `B/N`, knee-vs-best time, knee-vs-reference memory, `<=ref?`), the `B_knee` spread, and the heuristic fit (`const`, `c*N`, `c*V`, `c*D`, `c*N*V/D` ranked by log2 RMSE), then writes a per-shape time-vs-B / memory-vs-B figure.
 `--tol` sets the throughput-plateau width (default 0.03 = within 3% of the best time).
 
+## Profile (A100, confirm GEMM domination)
+
+```
+python chunk_size_sweep.py --profile --dtypes bfloat16 --profile-shape 8192 32768 16384 --profile-b 2048
+```
+
+Wraps one fwd+bwd in `torch.profiler`, attributes CUDA self-time to each aten op (self-time over the aten layer = total GPU time, no double count), and buckets into GEMM / gather-scatter / elementwise-reduction.
+The three GEMMs are `aten::mm` (forward logits), `aten::addmm` (grad_input), and `aten::addmm_` or `aten::mm` (grad_weight, compact vs scratch path).
+Run it at a couple of `--profile-b` values (e.g. 2048 and 512) to see whether smaller chunks shift time from GEMM toward softmax/launch overhead.
+
 ## Knobs
 
 `--num-tokens / --in-features / --num-classes` override the swept grid (space-separated lists).
