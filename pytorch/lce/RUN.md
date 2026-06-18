@@ -9,6 +9,27 @@ The script drives the chunked op through `chunking_method=None` + `batch_chunk_s
 It deliberately does NOT use `chunking_method="budget"` (the in-review #187271), so running on a clean `main` keeps the throughput baseline decoupled from the heuristic we are trying to replace.
 Build the usual way: `pip install -e . -v --no-build-isolation`.
 
+For the cross-GPU constant to be comparable, build the SAME `main` commit on every machine -- pin one SHA and use it everywhere, so the chunked-op code is byte-identical across architectures and only the hardware differs.
+The bf16 path needs sm_80+ (A100/H100/H200/B200/B300 all qualify).
+Blackwell (B200/B300) additionally needs a CUDA toolkit that knows its arch (12.8+) and `TORCH_CUDA_ARCH_LIST` covering it (e.g. `9.0` for Hopper, `10.0`/`12.0` for Blackwell); confirm the pinned `main` builds for Blackwell before relying on it.
+No liger needed -- this script never imports it.
+
+## Multiple GPUs
+
+Each machine auto-stamps its GPU into the CSV `device` column, so results from different GPUs can be fit together.
+Write one CSV per GPU (the device name is in the rows, not the filename), then merge them in `--analyze`:
+
+```
+# on each GPU machine (device-tag auto-detected):
+python chunk_size_sweep.py --out chunk_size_sweep_h100.csv --dtypes bfloat16
+
+# back on the analysis machine, after pulling all CSVs:
+python chunk_size_sweep.py --inputs chunk_size_sweep_*.csv --dtypes bfloat16 --analyze
+```
+
+`--analyze` then fits the constant per `(dtype, device)` and prints a cross-device table with `B/SM` to test whether the saturation `B` is a flat constant or scales with SM count.
+Pass `--device-tag NAME` to override the auto-detected slug (e.g. to disambiguate two cards of the same model).
+
 ## Measure (A100, GPU-bound, the only step that needs the A100)
 
 ```

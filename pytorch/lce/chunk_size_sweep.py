@@ -294,9 +294,27 @@ def run_profile(args) -> int:
 # ---------------------------------------------------------------------------
 
 _KEYS = [
-    "num_tokens", "in_features", "num_classes", "dtype", "mode",
+    "device", "num_tokens", "in_features", "num_classes", "dtype", "mode",
     "batch_chunk_size", "acc_policy", "time_ms", "memory_peak_bytes", "error",
 ]
+
+# Best-effort SM counts for the per-SM portability check; correct/extend as
+# needed (matched by substring against the device slug, uppercased).
+SM_COUNTS = {
+    "A100": 108,
+    "H100": 132,
+    "H200": 132,
+    "B200": 148,
+    "B300": 148,
+}
+
+
+def _sm_count(device: str) -> Optional[int]:
+    up = device.upper()
+    for key, sm in SM_COUNTS.items():
+        if key in up:
+            return sm
+    return None
 
 
 def _points(grid: dict, fixed: dict) -> list[dict]:
@@ -317,6 +335,7 @@ def _points(grid: dict, fixed: dict) -> list[dict]:
 
 def measure(args) -> int:
     device_type = "cuda" if torch.cuda.is_available() else "cpu"
+    tag = args.device_tag or _local_device_slug()[1]
     grid = SMOKE_GRID if args.smoke else DEFAULT_GRID
     fixed = SMOKE_FIXED if args.smoke else DEFAULT_FIXED
     if args.num_tokens:
@@ -332,6 +351,7 @@ def measure(args) -> int:
         with open(out) as f:
             for r in csv.DictReader(f):
                 existing.add((
+                    r.get("device", ""),
                     int(r["num_tokens"]), int(r["in_features"]), int(r["num_classes"]),
                     r["dtype"], r["mode"], r["batch_chunk_size"],
                 ))
@@ -354,16 +374,17 @@ def measure(args) -> int:
                         "warmup": args.warmup, "iters": args.iters, "seed": args.seed,
                         **job,
                     }
-                    key = (N, p["in_features"], p["num_classes"], dtype,
+                    key = (tag, N, p["in_features"], p["num_classes"], dtype,
                            job["mode"], str(job["batch_chunk_size"]))
                     if key in existing:
                         continue
                     row = _run_point(payload)
+                    row["device"] = tag
                     w.writerow(row)
                     f.flush()
-                    tag = "ref" if job["mode"] == "reference" else f"B={job['batch_chunk_size']}"
+                    blabel = "ref" if job["mode"] == "reference" else f"B={job['batch_chunk_size']}"
                     t = row.get("time_ms", float("nan"))
-                    print(f"  N{N} D{p['in_features']} V{p['num_classes']} {dtype} {tag}: "
+                    print(f"  N{N} D{p['in_features']} V{p['num_classes']} {dtype} {blabel}: "
                           f"{t:.2f} ms" + (f"  [{row['error'][:60]}]" if row.get("error") else ""))
     return 0
 
@@ -376,6 +397,7 @@ def _load(out: Path) -> list[dict]:
     rows = []
     with open(out) as f:
         for r in csv.DictReader(f):
+            r["device"] = r.get("device") or "unknown"
             for k in ("num_tokens", "in_features", "num_classes"):
                 r[k] = int(r[k])
             r["batch_chunk_size"] = int(r["batch_chunk_size"])
@@ -414,13 +436,15 @@ def _fit_heuristics(summary: list[dict]) -> None:
         ("D", lambda s: s["D"]),
         ("N*V/D", lambda s: s["N"] * s["V"] / s["D"]),
     ]
-    by_dtype: dict[str, list[dict]] = defaultdict(list)
+    by_group: dict[tuple, list[dict]] = defaultdict(list)
     for s in summary:
-        by_dtype[s["dtype"]].append(s)
-    for dt, pts in sorted(by_dtype.items()):
+        by_group[(s["dtype"], s["device"])].append(s)
+    const_by_device: dict[str, float] = {}
+    for (dt, dev), pts in sorted(by_group.items()):
         if len(pts) < 2:
             continue
-        print(f"\nHeuristic fit (dtype={dt}, {len(pts)} shapes), B_knee = c * f(N,D,V):")
+        print(f"\nHeuristic fit (dtype={dt}, device={dev}, {len(pts)} shapes), "
+              "B_knee = c * f(N,D,V):")
         print(f"  {'model':>10} {'c':>12} {'log2 RMSE':>10} {'rel RMSE':>9}  (lower is better)")
         results = []
         for name, f in models:
@@ -439,13 +463,29 @@ def _fit_heuristics(summary: list[dict]) -> None:
               f"(log2 RMSE {l2:.3f} = within ~{2 ** l2:.2f}x)")
         print("  log2 RMSE below ~0.5 => the model lands within one power-of-two "
               "sweep step of the measured knee.")
+        if name == "const":
+            const_by_device[dev] = c
+
+    # Cross-device portability: is the constant invariant, or invariant per SM?
+    if len(const_by_device) >= 2:
+        print("\nCross-device constant (is the saturation B portable?):")
+        print(f"  {'device':>28} {'const B':>9} {'SM':>5} {'B/SM':>8}")
+        for dev, c in sorted(const_by_device.items()):
+            sm = _sm_count(dev)
+            bsm = f"{c / sm:>8.2f}" if sm else f"{'?':>8}"
+            print(f"  {dev:>28} {c:>9.4g} {(sm if sm else '?'):>5} {bsm}")
+        print("  If 'const B' differs across devices but 'B/SM' is ~flat, the "
+              "portable heuristic is B = (B/SM) * SM_count.")
 
 
 def analyze(args) -> int:
-    rows = _load(Path(args.out))
+    paths = [Path(p) for p in (args.inputs or [args.out])]
+    rows: list[dict] = []
+    for p in paths:
+        rows += _load(p)
     by_shape: dict[tuple, dict] = defaultdict(dict)
     for r in rows:
-        shape = (r["num_tokens"], r["in_features"], r["num_classes"], r["dtype"])
+        shape = (r["num_tokens"], r["in_features"], r["num_classes"], r["dtype"], r["device"])
         if r["mode"] == "reference":
             by_shape[shape]["ref"] = r
         else:
@@ -453,11 +493,11 @@ def analyze(args) -> int:
 
     gib = 1024 ** 3
     print(f"\nThroughput knee (within {args.tol:.0%} of best time), per shape:")
-    print(f"{'N':>6} {'D':>7} {'V':>7} {'dt':>4} | {'B_knee':>7} {'B/N':>6} "
+    print(f"{'N':>6} {'D':>7} {'V':>7} {'dt':>4} {'device':>22} | {'B_knee':>7} {'B/N':>6} "
           f"{'t_knee':>8} {'t_best':>8} | {'mem_knee':>9} {'mem_ref':>9} {'<=ref?':>7}")
     summary = []
     for shape in sorted(by_shape):
-        N, D, V, dt = shape
+        N, D, V, dt, dev = shape
         rec = by_shape[shape]
         chunked = rec.get("chunked", [])
         knee = _knee(chunked, args.tol)
@@ -469,12 +509,12 @@ def analyze(args) -> int:
         mem_knee = knee["memory_peak_bytes"] / gib
         mem_ref = ref.get("memory_peak_bytes", float("nan")) / gib
         ok = "yes" if mem_knee <= mem_ref else "NO"
-        print(f"{N:>6} {D:>7} {V:>7} {dt:>4} | {knee['batch_chunk_size']:>7} "
+        print(f"{N:>6} {D:>7} {V:>7} {dt:>4} {dev[:22]:>22} | {knee['batch_chunk_size']:>7} "
               f"{knee['batch_chunk_size']/N:>6.3f} {knee['time_ms']:>8.2f} {t_best:>8.2f} | "
               f"{mem_knee:>9.3f} {mem_ref:>9.3f} {ok:>7}")
         summary.append({
-            "N": N, "D": D, "V": V, "dtype": dt, "B_knee": knee["batch_chunk_size"],
-            "mem_knee": mem_knee, "mem_ref": mem_ref,
+            "N": N, "D": D, "V": V, "dtype": dt, "device": dev,
+            "B_knee": knee["batch_chunk_size"], "mem_knee": mem_knee, "mem_ref": mem_ref,
         })
 
     if summary:
@@ -486,7 +526,7 @@ def analyze(args) -> int:
         _fit_heuristics(summary)
 
     if not args.no_plot:
-        _plot(by_shape, Path(args.out), args.tol)
+        _plot(by_shape, paths[0], args.tol)
     return 0
 
 
@@ -505,7 +545,7 @@ def _plot(by_shape: dict, out: Path, tol: float) -> None:
     nrows = math.ceil(len(shapes) / ncols)
     fig, axes = plt.subplots(2 * nrows, ncols, figsize=(4.5 * ncols, 5 * nrows), squeeze=False)
     for i, shape in enumerate(shapes):
-        N, D, V, dt = shape
+        N, D, V, dt, dev = shape
         rec = by_shape[shape]
         chunked = sorted(rec.get("chunked", []), key=lambda r: r["batch_chunk_size"])
         if not chunked:
@@ -525,7 +565,7 @@ def _plot(by_shape: dict, out: Path, tol: float) -> None:
         if knee is not None:
             ax_t.axvline(knee["batch_chunk_size"], color="green", ls="--", lw=1, label="knee")
             ax_m.axvline(knee["batch_chunk_size"], color="green", ls="--", lw=1)
-        ax_t.set_title(f"N{N} D{D} V{V} {dt}", fontsize=8)
+        ax_t.set_title(f"N{N} D{D} V{V} {dt}\n{dev[:24]}", fontsize=7)
         ax_t.set_ylabel("time (ms)")
         ax_t.set_xscale("log")
         _apply_log_xticks(ax_t, bs)
@@ -559,6 +599,12 @@ def _parse():
                    metavar=("N", "D", "V"), help="shape to profile (budget regime)")
     p.add_argument("--profile-b", type=int, default=2048, help="batch_chunk_size to profile")
     p.add_argument("--out", default=str(_THIS_DIR / "chunk_size_sweep.csv"))
+    p.add_argument("--device-tag", default=None,
+                   help="stamp this label into the 'device' column; defaults to the "
+                   "auto-detected GPU slug. Lets multiple GPUs share/merge a CSV.")
+    p.add_argument("--inputs", nargs="+", default=None,
+                   help="(analyze) one or more CSVs to merge and fit together; "
+                   "defaults to --out")
     p.add_argument("--dtypes", nargs="+", default=["bfloat16"])
     p.add_argument("--acc-policy", default="compact",
                    help="budget-regime CUDA auto pick is compact; sweep that path")
