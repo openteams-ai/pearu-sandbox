@@ -86,6 +86,19 @@ python chunk_size_sweep.py --out chunk_size_sweep_<gpu>_llm.csv --dtypes bfloat1
 
 `--regime llm` uses `num_classes >> in_features` vocab-head shapes (N up to 131072); `--liger` adds a liger baseline per shape (index targets, CUDA, requires liger-kernel installed).
 
+## Tile-alignment sub-sweep (for the floor_tile follow-up PR)
+
+The shipped rule rounds `B` to a power of two, but tile-alignment (multiples of ~128/256) is the real GEMM requirement and would let `B` and `auto:M` use finer steps.
+That is a separate follow-up PR; before it, confirm the throughput plateau has no power-of-two-specific cliffs with a tile-aligned sub-sweep at a couple of budget-regime shapes:
+
+```
+python chunk_size_sweep.py --out chunk_size_sweep_<gpu>_tile.csv --dtypes bfloat16 \
+  --num-tokens 8192 --in-features 32768 --num-classes 16384 --chunk-grid tile --tile 256
+python chunk_size_sweep.py --out chunk_size_sweep_<gpu>_tile.csv --dtypes bfloat16 --analyze
+```
+
+`--chunk-grid tile` sweeps multiples of `--tile` (incl. non-power-of-two sizes like 768, 1280, 1536); the time-vs-B plot should be smooth (no jumps only at powers of two) if tile-alignment suffices.
+
 ## Knobs
 
 `--num-tokens / --in-features / --num-classes` override the swept grid (space-separated lists).

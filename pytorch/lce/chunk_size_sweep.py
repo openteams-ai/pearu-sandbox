@@ -78,8 +78,19 @@ SMOKE_FIXED = {"num_tokens": 512, "in_features": 4096, "num_classes": 1024}
 _DTYPE_MAP = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
 
 
-def _chunk_sizes(num_tokens: int) -> list[int]:
-    """Powers of two from 64 up to and including num_tokens (single chunk)."""
+def _chunk_sizes(num_tokens: int, grid: str = "pow2", tile: int = 256) -> list[int]:
+    """Chunk sizes to sweep up to and including num_tokens (single chunk).
+
+    grid="pow2" (default): powers of two from 64. grid="tile": multiples of
+    `tile` -- includes non-power-of-two sizes (e.g. 1536, 1792) to check whether
+    the throughput plateau has power-of-two-specific cliffs, i.e. whether
+    tile-alignment (not pow2) is sufficient for the shipped floor_tile rounding.
+    """
+    if grid == "tile":
+        sizes = list(range(tile, num_tokens, tile))
+        if num_tokens not in sizes:
+            sizes.append(num_tokens)
+        return sizes
     sizes = []
     b = 64
     while b < num_tokens:
@@ -398,7 +409,8 @@ def measure(args) -> int:
                 jobs = [{"mode": "reference", "batch_chunk_size": 0}]
                 if args.liger:
                     jobs.append({"mode": "liger", "batch_chunk_size": 0})
-                jobs += [{"mode": "chunked", "batch_chunk_size": b} for b in _chunk_sizes(N)]
+                jobs += [{"mode": "chunked", "batch_chunk_size": b}
+                         for b in _chunk_sizes(N, args.chunk_grid, args.tile)]
                 for job in jobs:
                     payload = {
                         **p, "dtype": dtype, "device_type": device_type,
@@ -668,6 +680,10 @@ def _parse():
     p.add_argument("--tol", type=float, default=0.03, help="throughput-plateau tolerance")
     p.add_argument("--regime", choices=("budget", "llm"), default="budget",
                    help="budget (in_features>=num_classes, default) or llm (num_classes>>in_features)")
+    p.add_argument("--chunk-grid", choices=("pow2", "tile"), default="pow2",
+                   help="pow2 (default) or tile (multiples of --tile, incl non-pow2; "
+                   "for the tile-alignment / floor_tile follow-up)")
+    p.add_argument("--tile", type=int, default=256, help="tile size for --chunk-grid tile")
     p.add_argument("--liger", action="store_true",
                    help="also measure a liger baseline per shape (index targets, CUDA, if installed)")
     p.add_argument("--smoke", action="store_true", help="tiny grid for local validation")
