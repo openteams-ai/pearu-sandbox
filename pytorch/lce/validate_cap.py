@@ -1,0 +1,89 @@
+"""Validate the min(aspect_ratio_B, k*SM) cap from existing sweep CSVs -- on main.
+
+The chunk_size_sweep CSVs already measured time+memory at every power-of-two B
+per shape (explicit batch_chunk_size, chunking_method=None -- the landed #187219
+API). So the cap is testable on plain main with no heuristic implemented: for
+each shape read off the measured time/memory at aspect_ratio's uncapped chunk
+and at the capped chunk B_cap = min(aspect_ratio_B, round_pow2(k*SM)), and check
+the cap is a Pareto move (>= throughput, <= memory) and where it engages.
+
+k*SM is taken per device as the geomean B_knee at --tol (the measured saturation
+constant). aspect_ratio uses factor 2 (the auto index-target CUDA default).
+"""
+from __future__ import annotations
+
+import glob
+import math
+from collections import defaultdict
+from pathlib import Path
+
+from chunk_size_sweep import _knee, _load, _sm_count
+
+_THIS = Path(__file__).resolve().parent
+TOL = 0.05
+FACTOR = 2  # auto index-target CUDA default is aspect_ratio:2
+
+
+def _round_pow2(x: float) -> int:
+    return 1 << round(math.log2(x)) if x > 0 else 1
+
+
+def _next_pow2(x: int) -> int:
+    v = 1
+    while v < x:
+        v *= 2
+    return v
+
+
+def _aspect_ratio_b(N: int, D: int, V: int, factor: int) -> int:
+    inc = -(-V // D)               # ceil(V/D)
+    return max(1, _next_pow2(-(-N // inc)) // factor)   # next_pow2(ceil(N/inc))/factor
+
+
+def main() -> None:
+    gib = 1024 ** 3
+    for f in sorted(glob.glob(str(_THIS / "chunk_size_sweep_*.csv"))):
+        rows = _load(Path(f))
+        chunked: dict[tuple, dict] = defaultdict(dict)   # shape -> {B: (t, mem)}
+        knees: list[int] = []
+        dev, sm = "?", 0
+        for r in rows:
+            if r["mode"] != "chunked":
+                continue
+            dev = r["device"]
+            sm = r["sm_count"] or _sm_count(dev) or 0
+            sh = (r["num_tokens"], r["in_features"], r["num_classes"])
+            chunked[sh][r["batch_chunk_size"]] = (r["time_ms"], r["memory_peak_bytes"])
+        for sh, bmap in chunked.items():
+            kn = _knee([{"batch_chunk_size": b, "time_ms": t}
+                        for b, (t, _) in bmap.items()], TOL)
+            if kn:
+                knees.append(kn["batch_chunk_size"])
+        if not knees:
+            continue
+        const = math.exp(sum(math.log(b) for b in knees) / len(knees))
+        cap = _round_pow2(const)
+
+        print(f"\n{dev}  (SM={sm}; k*SM~={const:.0f} -> cap=round_pow2={cap}; tol={TOL:.0%}, aspect_ratio:{FACTOR})")
+        print(f"  {'N':>6} {'D':>7} {'V':>7} | {'aspect_B':>9} {'B_cap':>6} {'engaged':>8} "
+              f"| {'t_cap/t_asp':>11} {'mem_cap/mem_asp':>15}")
+        for sh in sorted(chunked):
+            N, D, V = sh
+            asp = _aspect_ratio_b(N, D, V, FACTOR)
+            bcap = min(asp, cap)
+            bmap = chunked[sh]
+            if asp not in bmap or bcap not in bmap:
+                continue
+            t_asp, m_asp = bmap[asp]
+            t_cap, m_cap = bmap[bcap]
+            eng = "yes" if bcap < asp else "no"
+            tr = t_cap / t_asp if t_asp == t_asp and t_asp else float("nan")
+            mr = m_cap / m_asp if m_asp == m_asp and m_asp else float("nan")
+            print(f"  {N:>6} {D:>7} {V:>7} | {asp:>9} {bcap:>6} {eng:>8} "
+                  f"| {tr:>11.3f} {mr:>15.3f}")
+        print("  (Pareto cap: t_cap/t_asp ~<= 1.0 means no throughput loss; "
+              "mem_cap/mem_asp < 1.0 means memory saved.)")
+
+
+if __name__ == "__main__":
+    main()

@@ -294,8 +294,8 @@ def run_profile(args) -> int:
 # ---------------------------------------------------------------------------
 
 _KEYS = [
-    "device", "sm_count", "num_tokens", "in_features", "num_classes", "dtype",
-    "mode", "batch_chunk_size", "acc_policy", "time_ms", "memory_peak_bytes", "error",
+    "device", "sm_count", "total_mem_bytes", "num_tokens", "in_features", "num_classes",
+    "dtype", "mode", "batch_chunk_size", "acc_policy", "time_ms", "memory_peak_bytes", "error",
 ]
 
 # Best-effort SM counts for the per-SM portability check; correct/extend as
@@ -336,8 +336,11 @@ def _points(grid: dict, fixed: dict) -> list[dict]:
 def measure(args) -> int:
     device_type = "cuda" if torch.cuda.is_available() else "cpu"
     tag = args.device_tag or _local_device_slug()[1]
-    # Actual SM count from the hardware -- authoritative, no per-model guessing.
+    # Actual SM count + total VRAM from the hardware -- authoritative. total_mem
+    # lets the analysis flag OOM headroom (peak vs available) on memory-
+    # constrained cards, where the k*SM chunk may not fit.
     sm = torch.cuda.get_device_properties(0).multi_processor_count if device_type == "cuda" else 0
+    total_mem = torch.cuda.get_device_properties(0).total_memory if device_type == "cuda" else 0
     grid = SMOKE_GRID if args.smoke else DEFAULT_GRID
     fixed = SMOKE_FIXED if args.smoke else DEFAULT_FIXED
     if args.num_tokens:
@@ -383,6 +386,7 @@ def measure(args) -> int:
                     row = _run_point(payload)
                     row["device"] = tag
                     row["sm_count"] = sm
+                    row["total_mem_bytes"] = total_mem
                     w.writerow(row)
                     f.flush()
                     blabel = "ref" if job["mode"] == "reference" else f"B={job['batch_chunk_size']}"
@@ -405,6 +409,10 @@ def _load(out: Path) -> list[dict]:
                 r["sm_count"] = int(r.get("sm_count") or 0)
             except ValueError:
                 r["sm_count"] = 0
+            try:
+                r["total_mem_bytes"] = int(r.get("total_mem_bytes") or 0)
+            except ValueError:
+                r["total_mem_bytes"] = 0
             for k in ("num_tokens", "in_features", "num_classes"):
                 r[k] = int(r[k])
             r["batch_chunk_size"] = int(r["batch_chunk_size"])
@@ -506,7 +514,7 @@ def analyze(args) -> int:
     gib = 1024 ** 3
     print(f"\nThroughput knee (within {args.tol:.0%} of best time), per shape:")
     print(f"{'N':>6} {'D':>7} {'V':>7} {'dt':>4} {'device':>22} | {'B_knee':>7} {'B/N':>6} "
-          f"{'t_knee':>8} {'t_best':>8} | {'mem_knee':>9} {'mem_ref':>9} {'<=ref?':>7}")
+          f"{'t_knee':>8} {'t_best':>8} | {'mem_knee':>9} {'mem_ref':>9} {'<=ref?':>7} {'%vram':>6}")
     summary = []
     for shape in sorted(by_shape):
         N, D, V, dt, dev = shape
@@ -521,9 +529,11 @@ def analyze(args) -> int:
         mem_knee = knee["memory_peak_bytes"] / gib
         mem_ref = ref.get("memory_peak_bytes", float("nan")) / gib
         ok = "yes" if mem_knee <= mem_ref else "NO"
+        total_gb = knee.get("total_mem_bytes", 0) / gib
+        vram = f"{100 * mem_knee / total_gb:>5.0f}%" if total_gb else f"{'?':>6}"
         print(f"{N:>6} {D:>7} {V:>7} {dt:>4} {dev[:22]:>22} | {knee['batch_chunk_size']:>7} "
               f"{knee['batch_chunk_size']/N:>6.3f} {knee['time_ms']:>8.2f} {t_best:>8.2f} | "
-              f"{mem_knee:>9.3f} {mem_ref:>9.3f} {ok:>7}")
+              f"{mem_knee:>9.3f} {mem_ref:>9.3f} {ok:>7} {vram:>6}")
         summary.append({
             "N": N, "D": D, "V": V, "dtype": dt, "device": dev,
             "sm_count": knee.get("sm_count", 0),

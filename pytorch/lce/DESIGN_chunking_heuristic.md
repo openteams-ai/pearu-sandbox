@@ -2,7 +2,7 @@
 
 ## Summary
 
-In the budget regime (`in_features >= num_classes`, above the aspect_ratio crossing) the throughput-optimal chunk size is `B = k * SM_count`, rounded to a power of two.
+In the budget regime (`in_features >= num_classes`, above the aspect_ratio crossing) the throughput-optimal chunk size is a per-architecture constant `k * SM_count`, rounded to a power of two, applied as a CAP on `aspect_ratio` (`B = min(aspect_ratio_B, round_pow2(k * SM_count))`).
 `k` is a constant set by the GPU's tensor-core generation -- not by shape, not by memory bandwidth/capacity, not by SKU.
 Measured across five GPUs: `k ~= 14` for Ampere/Hopper and `~= 17.4` for Blackwell at a 5%-off-peak throughput tolerance (`~= 23` and `~= 30` at 3%).
 This replaces the `eps=1` budget heuristic (which sizes `B` proportional to `in_features`), whose functional form the data contradicts.
@@ -48,15 +48,39 @@ Both optimize memory, which is the wrong objective here.
 
 ## Recommended heuristic
 
+On CUDA, resolve `auto` to a concrete `batch_chunk_size`:
+
 ```
-B = clamp(round_pow2(k * SM_count), 1, num_batches)
+B = clamp( min(aspect_ratio_B, round_pow2(k * SM_count)), 1, num_batches )
 ```
 
-`SM_count` from `torch.cuda.get_device_properties(dev).multi_processor_count` at runtime.
-`k` from a small table keyed by compute-capability major: Ampere/Hopper one value, Blackwell ~1.25x.
-Round to a power of two for consistency with `aspect_ratio`'s `next_pow2` and because GEMM tiles favor it; the plateau is flat so rounding is free.
-`k` is the throughput/memory knob (tighter tolerance -> larger `k` -> closer to peak throughput, more memory): suggested defaults near the 3-5% band, e.g. `k ~= 16` (Ampere/Hopper) and `~= 20` (Blackwell) for a balanced point, or `~= 24` / `~= 30` to favor throughput.
-Pick one tolerance as a one-time policy decision; quote/measure `k` at `tol >= 0.05`, since the 3% band is noise-sensitive at the power-of-two boundary.
+where `aspect_ratio_B` is the size auto's `aspect_ratio` variant would produce and `round_pow2(k * SM_count)` is the throughput-saturation chunk.
+`k * SM_count` is a CAP, not a target: where `aspect_ratio_B <= k*SM` (the vocab-head / LLM region) the cap is inert and `aspect_ratio` is used unchanged; where `aspect_ratio_B > k*SM` (near and above the crossing, or huge-batch / moderate-vocab) it caps the chunk at the saturation point.
+This subsumes the crossing switch and is continuous in the shape.
+Against uncapped `aspect_ratio` the cap trades at most the chosen tolerance in throughput for substantial memory: read off the existing per-GPU sweeps (`validate_cap.py`), the cap at tol 0.05 runs ~2-5% slower while using 12-44% less memory, and the memory savings grow with `num_tokens` (up to ~44% at N=65536). Tighten the tolerance for strictly-zero throughput loss at smaller memory savings.
+We do not have a prediction for whether the cap engages in the LLM region; the `auto`-vs-liger memory plots will show it -- where our capped chunk diverges from liger's (uncapped `aspect_ratio`) chunk, the cap bit.
+
+`SM_count` from `torch.cuda.get_device_properties(dev).multi_processor_count`; `k` from a small table keyed by compute-capability major (Ampere/Hopper one value, Blackwell ~1.25x).
+Round to a power of two (consistency with `aspect_ratio`'s `next_pow2`; GEMM tiles favor it; the plateau is flat so rounding is free).
+`k` encodes the throughput/memory tolerance (tighter tolerance -> larger `k` -> closer to peak, more memory); quote/measure it at `tol >= 0.05`, since the 3% band is noise-sensitive at the power-of-two boundary.
+Reference values: `k ~= 14` (Ampere/Hopper) / `~= 17.4` (Blackwell) at tol 0.05; `~= 23` / `~= 30` at tol 0.03.
+
+Non-CUDA: no cap -- `B = aspect_ratio_B`, which degenerates to a single chunk above the crossing (accepted; see Device scope).
+
+### Memory dial: `auto:M`
+
+`k * SM_count` is throughput-optimal only when the resulting chunk fits in available memory; on a high-SM / low-VRAM device with large `in_features` the per-chunk buffer (`~ k*SM * in_features * acc_bytes`) can OOM, and then a smaller chunk (more chunks, lower throughput) is strictly preferable to failing.
+The op cannot reliably know available memory at resolution time (free memory is not peak headroom, and it races with other allocations), so the memory/throughput trade is exposed as an explicit user dial rather than auto-detected:
+
+```
+auto:M  ->  B = clamp( round_pow2( min(aspect_ratio_B, k*SM) / M ), 1, num_batches )
+```
+
+`auto` == `auto:1` is max throughput; `M > 1` gives an ~M-times smaller chunk (~M-times less per-chunk buffer, more chunks, lower throughput).
+The user raises `M` until the op fits, getting the best throughput achievable at that memory level.
+`M` mirrors the existing `aspect_ratio:N` divisor and applies to the final resolved `B` uniformly, so it also relieves OOM in the LLM region.
+Ship `auto:M` only once a benchmark shows `k*SM` actually OOMs somewhere (the 80 GB cards measured so far have ample headroom); reserve the grammar now so adding it later is non-breaking.
+`batch_chunk_size` remains the absolute-size escape hatch.
 
 ## Recommendation for #187271
 
