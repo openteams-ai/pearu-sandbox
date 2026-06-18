@@ -458,13 +458,15 @@ def _fit_heuristics(summary: list[dict]) -> None:
         results.sort()
         for l2, name, c, relrmse in results:
             print(f"  {name:>10} {c:>12.4g} {l2:>10.3f} {relrmse:>9.3f}")
+            # Always record the constant model so the per-SM portability check
+            # below can run, even when 'const' is not this device's top fit.
+            if name == "const":
+                const_by_device[dev] = c
         l2, name, c, _ = results[0]
         print(f"  -> best: B_knee ~= {c:.4g} * {name}  "
               f"(log2 RMSE {l2:.3f} = within ~{2 ** l2:.2f}x)")
         print("  log2 RMSE below ~0.5 => the model lands within one power-of-two "
               "sweep step of the measured knee.")
-        if name == "const":
-            const_by_device[dev] = c
 
     # Cross-device portability: is the constant invariant, or invariant per SM?
     if len(const_by_device) >= 2:
