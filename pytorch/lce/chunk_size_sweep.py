@@ -59,6 +59,15 @@ DEFAULT_GRID = {
 }
 DEFAULT_FIXED = {"num_tokens": 8192, "in_features": 32768, "num_classes": 16384}
 
+# LLM region (num_classes >> in_features): real vocab heads, with N pushed up to
+# the extreme-batch tail where the cap could begin to engage.
+LLM_GRID = {
+    "num_tokens": [8192, 16384, 32768, 65536, 131072],
+    "in_features": [2048, 4096],
+    "num_classes": [50257, 128256, 256000],
+}
+LLM_FIXED = {"num_tokens": 32768, "in_features": 4096, "num_classes": 128256}
+
 SMOKE_GRID = {
     "num_tokens": [512, 1024],
     "in_features": [2048, 4096],
@@ -97,6 +106,18 @@ def _make_call(payload: dict, input, linear_weight, target):
     reduction = payload["reduction"]
     if payload["mode"] == "reference":
         return lambda: _reference_forward_backward(input, linear_weight, target, reduction)
+    if payload["mode"] == "liger":
+        from lce_benchmark import _liger_callable
+        liger = _liger_callable()
+        if liger is None:
+            raise RuntimeError("liger not installed")
+
+        def _liger_call():
+            out = liger(input, linear_weight, target, None, reduction=reduction)
+            loss = out[0] if isinstance(out, tuple) else out
+            loss.backward()
+            return loss
+        return _liger_call
     from torch.nn import LinearCrossEntropyOptions
 
     # chunking_method=None disables the heuristic and uses our explicit B,
@@ -341,8 +362,12 @@ def measure(args) -> int:
     # constrained cards, where the k*SM chunk may not fit.
     sm = torch.cuda.get_device_properties(0).multi_processor_count if device_type == "cuda" else 0
     total_mem = torch.cuda.get_device_properties(0).total_memory if device_type == "cuda" else 0
-    grid = SMOKE_GRID if args.smoke else DEFAULT_GRID
-    fixed = SMOKE_FIXED if args.smoke else DEFAULT_FIXED
+    if args.smoke:
+        grid, fixed = SMOKE_GRID, SMOKE_FIXED
+    elif args.regime == "llm":
+        grid, fixed = LLM_GRID, LLM_FIXED
+    else:
+        grid, fixed = DEFAULT_GRID, DEFAULT_FIXED
     if args.num_tokens:
         grid["num_tokens"] = args.num_tokens
     if args.in_features:
@@ -371,6 +396,8 @@ def measure(args) -> int:
             for p in _points(grid, fixed):
                 N = p["num_tokens"]
                 jobs = [{"mode": "reference", "batch_chunk_size": 0}]
+                if args.liger:
+                    jobs.append({"mode": "liger", "batch_chunk_size": 0})
                 jobs += [{"mode": "chunked", "batch_chunk_size": b} for b in _chunk_sizes(N)]
                 for job in jobs:
                     payload = {
@@ -639,6 +666,10 @@ def _parse():
     p.add_argument("--iters", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--tol", type=float, default=0.03, help="throughput-plateau tolerance")
+    p.add_argument("--regime", choices=("budget", "llm"), default="budget",
+                   help="budget (in_features>=num_classes, default) or llm (num_classes>>in_features)")
+    p.add_argument("--liger", action="store_true",
+                   help="also measure a liger baseline per shape (index targets, CUDA, if installed)")
     p.add_argument("--smoke", action="store_true", help="tiny grid for local validation")
     p.add_argument("--force", action="store_true", help="overwrite CSV instead of resuming")
     p.add_argument("--analyze", action="store_true", help="knee + plots from existing CSV")

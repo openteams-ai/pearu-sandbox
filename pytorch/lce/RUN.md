@@ -68,6 +68,24 @@ Wraps one fwd+bwd in `torch.profiler`, attributes CUDA self-time to each aten op
 The three GEMMs are `aten::mm` (forward logits), `aten::addmm` (grad_input), and `aten::addmm_` or `aten::mm` (grad_weight, compact vs scratch path).
 Run it at a couple of `--profile-b` values (e.g. 2048 and 512) to see whether smaller chunks shift time from GEMM toward softmax/launch overhead.
 
+## Validating the cap (no GPU)
+
+`validate_cap.py` reads the existing per-GPU CSVs and tests `B = min(aspect_ratio_B, round_pow2(k*SM))` on plain main (no heuristic implemented): it reports the measured throughput/memory trade where the cap engages, and -- purely arithmetically -- whether the cap engages in the LLM region (it does not, for realistic N).
+
+```
+python validate_cap.py
+```
+
+## LLM-region / liger run (optional)
+
+The cap is arithmetically inert in the LLM region for typical N (see `validate_cap.py`), so this is not needed to validate the cap -- only for the extreme-batch tail and the memory-vs-liger comparison.
+
+```
+python chunk_size_sweep.py --out chunk_size_sweep_<gpu>_llm.csv --dtypes bfloat16 --regime llm --liger
+```
+
+`--regime llm` uses `num_classes >> in_features` vocab-head shapes (N up to 131072); `--liger` adds a liger baseline per shape (index targets, CUDA, requires liger-kernel installed).
+
 ## Knobs
 
 `--num-tokens / --in-features / --num-classes` override the swept grid (space-separated lists).

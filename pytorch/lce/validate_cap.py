@@ -40,6 +40,34 @@ def _aspect_ratio_b(N: int, D: int, V: int, factor: int) -> int:
     return max(1, _next_pow2(-(-N // inc)) // factor)   # next_pow2(ceil(N/inc))/factor
 
 
+def _liger_b(N: int, D: int, V: int) -> int:
+    # liger's own chunk: next_pow2(ceil(BT / ceil(V/H))), factor 1.
+    return _aspect_ratio_b(N, D, V, 1)
+
+
+# Representative LLM-region (V >> D) shapes -- the cap engages only if
+# aspect_ratio's chunk already exceeds k*SM there.
+_LLM_SHAPES = [
+    ("Llama3 head, 8k tok", 8192, 4096, 128256),
+    ("Llama3 head, 32k tok", 32768, 4096, 128256),
+    ("Gemma head, 8k tok", 8192, 3072, 256000),
+    ("GPT2-ish, 16k tok", 16384, 1024, 50257),
+    ("huge batch, 128k tok", 131072, 4096, 128256),
+]
+
+
+def _llm_engagement(cap: int) -> None:
+    print(f"\nLLM-region cap engagement (cap = round_pow2(k*SM) = {cap}; "
+          "cap engages iff aspect_ratio_B > cap -- pure arithmetic, no sweep):")
+    print(f"  {'shape':>22} {'N':>7} {'D':>6} {'V':>7} | {'aspB:2':>7} {'aspB:1':>7} {'liger':>6} | {'engaged?':>9}")
+    for lbl, N, D, V in _LLM_SHAPES:
+        b2, b1, lg = _aspect_ratio_b(N, D, V, 2), _aspect_ratio_b(N, D, V, 1), _liger_b(N, D, V)
+        eng = "yes" if max(b2, b1) > cap else "no"
+        print(f"  {lbl:>22} {N:>7} {D:>6} {V:>7} | {b2:>7} {b1:>7} {lg:>6} | {eng:>9}")
+    print(f"  Cap engages only above N ~ cap*factor*ceil(V/D); for cap={cap}, factor<=2, V/D>=8 "
+          f"that is N > ~{cap*2*8}. Typical LLM training N (<= ~32768) is well below -> cap INERT in the LLM region.")
+
+
 def main() -> None:
     gib = 1024 ** 3
     for f in sorted(glob.glob(str(_THIS / "chunk_size_sweep_*.csv"))):
@@ -81,8 +109,9 @@ def main() -> None:
             mr = m_cap / m_asp if m_asp == m_asp and m_asp else float("nan")
             print(f"  {N:>6} {D:>7} {V:>7} | {asp:>9} {bcap:>6} {eng:>8} "
                   f"| {tr:>11.3f} {mr:>15.3f}")
-        print("  (Pareto cap: t_cap/t_asp ~<= 1.0 means no throughput loss; "
-              "mem_cap/mem_asp < 1.0 means memory saved.)")
+        print("  (cap trades <= tol throughput for memory: t_cap/t_asp is the cost, "
+              "mem_cap/mem_asp < 1.0 the saving.)")
+        _llm_engagement(cap)
 
 
 if __name__ == "__main__":
