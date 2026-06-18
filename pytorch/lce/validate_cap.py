@@ -68,19 +68,50 @@ def _llm_engagement(cap: int) -> None:
           f"that is N > ~{cap*2*8}. Typical LLM training N (<= ~32768) is well below -> cap INERT in the LLM region.")
 
 
+def _bref_fit(dev: str, ref: dict, chunked: dict) -> None:
+    """B_ref = largest swept B with chunked(B) <= reference, per shape; fit c*N*V/D.
+
+    This is the memory cap: the most efficient chunk that does not exceed
+    reference memory. Memory is device-independent, so c should match across
+    GPUs (unlike the per-arch throughput k).
+    """
+    rows = []
+    for sh in sorted(chunked):
+        if sh not in ref:
+            continue
+        N, D, V = sh
+        fit = [b for b, (_, m) in chunked[sh].items() if m == m and m <= ref[sh]]
+        if fit:
+            rows.append((N, D, V, max(fit)))
+    if not rows:
+        return
+    ratios = [b / (N * V / D) for N, D, V, b in rows]
+    c = math.exp(sum(math.log(r) for r in ratios) / len(ratios))
+    l2 = (sum(math.log2(c * (N * V / D) / b) ** 2 for N, D, V, b in rows) / len(rows)) ** 0.5
+    print(f"  B_ref = largest B with chunked <= reference;  fit B_ref ~= {c:.3f} * N*V/D "
+          f"(log2 RMSE {l2:.3f})")
+    print(f"  {'N':>6} {'D':>7} {'V':>7} | {'B_ref':>6} {'N*V/D':>8} {'B_ref/(NV/D)':>12}")
+    for N, D, V, b in rows:
+        print(f"  {N:>6} {D:>7} {V:>7} | {b:>6} {N * V / D:>8.0f} {b / (N * V / D):>12.4f}")
+
+
 def main() -> None:
     gib = 1024 ** 3
     for f in sorted(glob.glob(str(_THIS / "chunk_size_sweep_*.csv"))):
         rows = _load(Path(f))
         chunked: dict[tuple, dict] = defaultdict(dict)   # shape -> {B: (t, mem)}
+        ref: dict[tuple, float] = {}                     # shape -> reference mem
         knees: list[int] = []
         dev, sm = "?", 0
         for r in rows:
+            sh = (r["num_tokens"], r["in_features"], r["num_classes"])
+            if r["mode"] == "reference":
+                ref[sh] = r["memory_peak_bytes"]
+                continue
             if r["mode"] != "chunked":
                 continue
             dev = r["device"]
             sm = r["sm_count"] or _sm_count(dev) or 0
-            sh = (r["num_tokens"], r["in_features"], r["num_classes"])
             chunked[sh][r["batch_chunk_size"]] = (r["time_ms"], r["memory_peak_bytes"])
         for sh, bmap in chunked.items():
             kn = _knee([{"batch_chunk_size": b, "time_ms": t}
@@ -111,6 +142,8 @@ def main() -> None:
                   f"| {tr:>11.3f} {mr:>15.3f}")
         print("  (cap trades <= tol throughput for memory: t_cap/t_asp is the cost, "
               "mem_cap/mem_asp < 1.0 the saving.)")
+        print()
+        _bref_fit(dev, ref, chunked)
         _llm_engagement(cap)
 
 

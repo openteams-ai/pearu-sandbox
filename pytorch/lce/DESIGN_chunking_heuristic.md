@@ -2,9 +2,14 @@
 
 ## Summary
 
-In the budget regime (`in_features >= num_classes`, above the aspect_ratio crossing) the throughput-optimal chunk size is a per-architecture constant `k * SM_count`, rounded to a power of two, applied as a CAP on `aspect_ratio` (`B = min(aspect_ratio_B, round_pow2(k * SM_count))`).
-`k` is a constant set by the GPU's tensor-core generation -- not by shape, not by memory bandwidth/capacity, not by SKU.
-Measured across five GPUs: `k ~= 14` for Ampere/Hopper and `~= 17.4` for Blackwell at a 5%-off-peak throughput tolerance (`~= 23` and `~= 30` at 3%).
+The objective is to maximize throughput subject to chunked peak memory not exceeding the unchunked reference (so chunking is never an OOM/memory regression). The shipped rule is a single device-independent memory cap on `aspect_ratio`:
+
+```
+B = clamp( min( aspect_ratio_B,  floor_tile( N*V / (4*D) ) ), 1, num_batches )
+```
+
+`N*V/(4*D)` is `B_ref`, the largest chunk whose peak memory stays at or below reference, fit empirically across five GPUs as `0.251 * N*V/D` (log2 RMSE 0.011, identical on every GPU -- memory is device-independent). `floor_tile` rounds down to a GEMM tile multiple (~128/256) rather than a power of two (see below).
+The journey first established the *throughput* ceiling -- the throughput-saturating chunk is a per-arch constant `k * SM_count` (`k ~= 14` Ampere/Hopper, `~= 17.4` Blackwell at tol 0.05) -- but in the budget regime `B_ref < k*SM` (memory binds before saturation), so the memory cap is what ships; `k*SM` explains why bigger chunks stop helping and is an optional secondary cap (memory-minimization near the crossing).
 This replaces the `eps=1` budget heuristic (which sizes `B` proportional to `in_features`), whose functional form the data contradicts.
 
 ## Why throughput, and why a fresh heuristic
@@ -16,7 +21,7 @@ It targets the vocab-head regime (`num_classes >> in_features`), where the `BT x
 
 In the budget regime (`in_features >= num_classes`) liger's formula degenerates: `inc_factor = ceil(V/H) = 1`, so `chunk_size = next_pow2(BT)` = a single chunk (no chunking at all).
 So liger provides no heuristic here, and the materialization it guards against is no longer the dominant term -- chunking's memory purpose lapses.
-Lacking an established chunk size, we optimize throughput directly (measured), treating memory as a checked constraint rather than the objective: at large `num_tokens` (the real LLM regime) the throughput-optimal chunk already sits at or below the reference peak, so throughput is the binding concern in this regime.
+Lacking an established chunk size, we maximize throughput subject to a hard memory constraint -- chunked peak must not exceed the unchunked reference (chunking must never be a memory regression). The throughput-optimal chunk (`k*SM`) does exceed reference deep in the budget regime, so the binding term there is the memory cap `B_ref`, and the chunk runs below peak throughput to stay under reference (the price of OOM-safety). Where memory is not binding (near the crossing / large vocab) throughput dominates.
 
 ## Method
 
@@ -42,66 +47,63 @@ The grad_weight accumulation (`addmm_`, contraction dim `B`) re-streams the `(nu
 
 ## Why not the alternatives
 
-`eps=1` sizes `B` proportional to `in_features` (`B = input_footprint / per_row`); the data shows `B` is independent of `in_features`.
-A reference-memory cap would size `B` proportional to `N*V/D`; that model fit the data worst of all candidates.
-Both optimize memory, which is the wrong objective here.
+`eps=1` sizes `B` proportional to `in_features`; the throughput-saturating chunk is shape-independent (`k*SM`), so `eps=1` is the wrong form for throughput.
+A reference-memory cap sizes `B` proportional to `N*V/D` -- which fit the *throughput* knee worst of all candidates, confirming it is not a throughput heuristic. But that is exactly the right form for the *memory* bound: `B_ref = N*V/(4*D)` is where chunked peak meets reference (below). The lesson is that throughput and memory want different forms; the shipped rule uses each for its own job (`k*SM` characterizes the throughput ceiling, `B_ref` is the binding memory cap).
 
 ## Recommended heuristic
 
-On CUDA, resolve `auto` to a concrete `batch_chunk_size`:
+Resolve `auto` to a concrete `batch_chunk_size`:
 
 ```
-B = clamp( min(aspect_ratio_B, round_pow2(k * SM_count)), 1, num_batches )
+B = clamp( min( aspect_ratio_B,  floor_tile( N*V / (4*D) ) ), 1, num_batches )
 ```
 
-where `aspect_ratio_B` is the size auto's `aspect_ratio` variant would produce and `round_pow2(k * SM_count)` is the throughput-saturation chunk.
-`k * SM_count` is a CAP, not a target: where `aspect_ratio_B <= k*SM` (the vocab-head / LLM region) the cap is inert and `aspect_ratio` is used unchanged; where `aspect_ratio_B > k*SM` (near and above the crossing, or huge-batch / moderate-vocab) it caps the chunk at the saturation point.
-This subsumes the crossing switch and is continuous in the shape.
-Against uncapped `aspect_ratio` the cap trades at most the chosen tolerance in throughput for substantial memory: read off the existing per-GPU sweeps (`validate_cap.py`), the cap at tol 0.05 runs ~2-5% slower while using 12-44% less memory, and the memory savings grow with `num_tokens` (up to ~44% at N=65536). Tighten the tolerance for strictly-zero throughput loss at smaller memory savings.
-We do not have a prediction for whether the cap engages in the LLM region; the `auto`-vs-liger memory plots will show it -- where our capped chunk diverges from liger's (uncapped `aspect_ratio`) chunk, the cap bit.
+`N*V/(4*D)` is `B_ref`, the largest chunk whose peak memory stays at or below reference. It is fit empirically (`validate_cap.py`) as `0.251 * N*V/D`, **log2 RMSE 0.011, identical on all five GPUs** -- memory is device-independent, so unlike the throughput `k` this needs no per-arch table. It reads intuitively: `B_ref = N/4` at the crossing (`D=V`) and halves each time `in_features` doubles. The `min` with `aspect_ratio_B` makes it inert in the LLM region (there `aspect_ratio_B << B_ref`), so `aspect_ratio`/liger behavior is unchanged where it is validated.
 
-`SM_count` from `torch.cuda.get_device_properties(dev).multi_processor_count`; `k` from a small table keyed by compute-capability major (Ampere/Hopper one value, Blackwell ~1.25x).
-Round to a power of two (consistency with `aspect_ratio`'s `next_pow2`; GEMM tiles favor it; the plateau is flat so rounding is free).
-`k` encodes the throughput/memory tolerance (tighter tolerance -> larger `k` -> closer to peak, more memory); quote/measure it at `tol >= 0.05`, since the 3% band is noise-sensitive at the power-of-two boundary.
-Reference values: `k ~= 14` (Ampere/Hopper) / `~= 17.4` (Blackwell) at tol 0.05; `~= 23` / `~= 30` at tol 0.03.
+The `0.25` is empirical: the naive analytic guess is `~N*V/D` (coefficient 1), 4x too large, because the op carries buffers beyond `V*logits + D*acc` (input-acc copy, upcast scratch, precompute persistent). Round **down** so the cap is always `<= reference`. `0.25` is for bf16 + `compact`; the byte composition shifts with dtype / acc-policy, so re-fit `c` per (dtype, policy) before assuming it (still device-independent).
 
-Non-CUDA: no cap -- `B = aspect_ratio_B`, which degenerates to a single chunk above the crossing (accepted; see Device scope).
+`floor_tile` rounds down to a GEMM tile multiple (~128/256), not a power of two: power-of-two flooring can nearly halve `B` (e.g. 1900 -> 1024) and waste throughput for no memory reason, whereas tile-flooring (1900 -> 1792) keeps `B` near `B_ref` while still `<= reference`. Power-of-two is a safe conservative default, but tile-alignment is the real GEMM requirement -- confirm with a tile-aligned non-power-of-two sub-sweep before relying on it (we only measured powers of two).
+
+The throughput ceiling `k*SM` is not the shipped cap: in the budget regime `B_ref < k*SM` (to stay under reference you run below saturation -- the throughput you pay for OOM-safety). `k*SM` is retained only as an optional secondary cap that minimizes memory near the crossing for very large N (where `B_ref > k*SM`); the stated objective ("<= reference") does not require it.
+
+Non-CUDA: `B = min(aspect_ratio_B, floor_tile(N*V/4D))` works unchanged -- `B_ref` is device-independent, no SM query needed.
 
 ### Memory dial: `auto:M`
 
-`k * SM_count` is throughput-optimal only when the resulting chunk fits in available memory; on a high-SM / low-VRAM device with large `in_features` the per-chunk buffer (`~ k*SM * in_features * acc_bytes`) can OOM, and then a smaller chunk (more chunks, lower throughput) is strictly preferable to failing.
-The op cannot reliably know available memory at resolution time (free memory is not peak headroom, and it races with other allocations), so the memory/throughput trade is exposed as an explicit user dial rather than auto-detected:
+`B_ref` keeps chunked at or below reference, but reference itself can be the OOM ceiling, or other allocations may leave less headroom; on a memory-constrained device the user may need to chunk finer still. The op cannot reliably know available memory at resolution time (free memory is not peak headroom, and it races with other allocations), so this is exposed as an explicit user dial rather than auto-detected:
 
 ```
-auto:M  ->  B = clamp( round_pow2( min(aspect_ratio_B, k*SM) / M ), 1, num_batches )
+auto:M  ->  B = clamp( floor_tile( min(aspect_ratio_B, N*V/4D) / M ), 1, num_batches )
 ```
+
+`M` need not be a power of two: since throughput is monotonic in `B`, the largest tile multiple that fits (e.g. `M=4/3`, `B -> 3B/4`) beats coarse halving (`M=2`, `B -> B/2`) -- it avoids OOM while keeping more throughput. So `M` is a continuous-ish divisor with `floor_tile` applied, not restricted to powers of two.
 
 `auto` == `auto:1` is max throughput; `M > 1` gives an ~M-times smaller chunk (~M-times less per-chunk buffer, more chunks, lower throughput).
 The user raises `M` until the op fits, getting the best throughput achievable at that memory level.
 `M` mirrors the existing `aspect_ratio:N` divisor and applies to the final resolved `B` uniformly, so it also relieves OOM in the LLM region.
-Ship `auto:M` only once a benchmark shows `k*SM` actually OOMs somewhere (the 80 GB cards measured so far have ample headroom); reserve the grammar now so adding it later is non-breaking.
+Ship `auto:M` only once a memory-constrained run shows the `B_ref`-capped chunk can still OOM (i.e. reference itself does not fit, or co-allocations eat the headroom); reserve the grammar now so adding it later is non-breaking.
 `batch_chunk_size` remains the absolute-size escape hatch.
 
 ## Recommendation for #187271
 
-Replace the `eps`/threshold logic with the `k * SM_count` rule above, or retire #187271 in favor of it.
-The budget regime is outside the LLM-typical range, so there is no urgency; the throughput-proven heuristic is the better long-term answer and could supersede the budget method entirely.
+Replace the `eps`/threshold logic with the `min(aspect_ratio_B, floor_tile(N*V/4D))` rule above, or retire #187271 in favor of it.
+The budget regime is outside the LLM-typical range, so there is no urgency; the memory-bounded rule (with `k*SM` as the throughput rationale) is the better long-term answer and could supersede the budget method entirely.
 
 ## Device scope and terminology
 
-The `k * SM_count` rule is CUDA-specific and was measured only on CUDA bf16; it slots into the existing CUDA branch of the `auto` resolver, and non-CUDA devices keep their current `aspect_ratio` default unchanged (no regression).
-`B_knee` is shape-independent and tracks hardware parallelism, so it cannot be faithfully re-expressed as a function of `N`, `D`, or `V` -- the shape-form fits (`c*N`, `c*V`, `c*N*V/D`) were the worst candidates; the only honest generalization replaces `SM_count` with a device's parallel-unit/locality measure, which is hardware, not shape, and must be measured per backend.
-Correctness does not depend on the choice: chunk size is invariant up to floating-point rounding (the fp64 invariance test), so a non-optimal chunk size on a non-CUDA device costs throughput only, never accuracy.
-ROCm/AMD transfers the form -- HIP exposes `multi_processor_count` through the `torch.cuda` API -- but needs its own measured `k` (CDNA matrix cores differ; do not reuse the NVIDIA values); XPU and MPS expose different descriptors and each need their own measurement.
-CPU is expected to follow a different mechanism (chunk-size optimum is cache-residency-bound, not wave-saturation-bound), so `k * cores` is not assumed; CPU and other backends stay on `aspect_ratio` until there is demand and a measured result.
+The shipped rule -- `min(aspect_ratio_B, floor_tile(N*V/4D))` -- is **device-independent**: it needs no SM query and applies on every backend (the `B_ref` coefficient is the same across all five GPUs measured, since memory footprint is the same arithmetic everywhere). So non-CUDA devices get the same memory cap; this is not a regression (it only ever shrinks `aspect_ratio` to stay under reference).
+The `k*SM` throughput ceiling, in contrast, *is* per-architecture and CUDA-specific (measured only on CUDA bf16). It is not the shipped cap; it is the rationale for why bigger chunks stop helping, and an optional memory-minimizer near the crossing. Were it used as a cap, it would need a per-arch `k` table -- ROCm transfers the form via `multi_processor_count` but with its own `k` (CDNA matrix cores differ), and XPU/MPS/CPU would each need their own (CPU likely cache-residency-bound, a different mechanism). The `B_ref` rule avoids all of this.
+Correctness does not depend on the chunk size: it is invariant up to floating-point rounding (the fp64 invariance test), so a non-optimal chunk on any backend costs throughput only, never accuracy.
+Re-fit the `B_ref` coefficient per (dtype, acc-policy) -- it is `0.25` for bf16 + `compact`; the `per_row` byte composition shifts with dtype/acc-dtype (still device-independent).
 
-Terminology: "budget" named the `eps=1` memory-budget approach; the throughput-saturation rule is not a budget, so the CUDA pick should fold into `auto` (or be renamed, e.g. `sm_saturation`) rather than be surfaced as a user-facing `budget` method.
+Terminology: "budget" named the `eps=1` memory-budget approach; the shipped rule is a different (and correct) memory bound, so the CUDA pick should fold into `auto` (the resolver sets a concrete `batch_chunk_size`) rather than be surfaced as a user-facing `budget` method.
 
 ## Caveats and future work
 
-Measured for bf16 only; fp16 and fp32-accumulation paths may use different GEMM tiles and so a different `k` -- measure before assuming.
-The shape grid is moderate; the SM-linearity and the two-class result are robust, but a new architecture should be measured (one sweep) rather than extrapolated.
-A future `k` could be derived from queryable hardware (tile size * SM count) instead of an arch table, but the table is simpler and the set of architectures is small.
+Measured for bf16 + `compact` only; re-fit the `B_ref` coefficient (`0.25`) per (dtype, acc-policy) before assuming it -- the `per_row` byte composition shifts with dtype/acc-dtype (the result stays device-independent).
+Tile-alignment is unverified: we only swept powers of two, so `floor_tile` (vs `floor_pow2`) rests on GEMM reasoning, not data -- confirm with a tile-aligned non-power-of-two sub-sweep (e.g. `B` over multiples of 256) that the throughput plateau has no power-of-two-specific cliffs before shipping tile-flooring.
+The `k*SM` throughput finding (per-arch, two classes) is robust across five GPUs, but it is the rationale, not the shipped cap; the shipped `B_ref` rule is device-independent and needs no per-arch measurement for a new GPU.
+The shape grid is moderate; `B_ref = 0.25*N*V/D` is clean (log2 RMSE 0.011) but should be spot-checked at LLM-region and extreme-batch shapes the grid did not cover.
 
 ## Data and reproduction
 
