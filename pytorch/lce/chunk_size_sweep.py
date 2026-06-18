@@ -294,8 +294,8 @@ def run_profile(args) -> int:
 # ---------------------------------------------------------------------------
 
 _KEYS = [
-    "device", "num_tokens", "in_features", "num_classes", "dtype", "mode",
-    "batch_chunk_size", "acc_policy", "time_ms", "memory_peak_bytes", "error",
+    "device", "sm_count", "num_tokens", "in_features", "num_classes", "dtype",
+    "mode", "batch_chunk_size", "acc_policy", "time_ms", "memory_peak_bytes", "error",
 ]
 
 # Best-effort SM counts for the per-SM portability check; correct/extend as
@@ -336,6 +336,8 @@ def _points(grid: dict, fixed: dict) -> list[dict]:
 def measure(args) -> int:
     device_type = "cuda" if torch.cuda.is_available() else "cpu"
     tag = args.device_tag or _local_device_slug()[1]
+    # Actual SM count from the hardware -- authoritative, no per-model guessing.
+    sm = torch.cuda.get_device_properties(0).multi_processor_count if device_type == "cuda" else 0
     grid = SMOKE_GRID if args.smoke else DEFAULT_GRID
     fixed = SMOKE_FIXED if args.smoke else DEFAULT_FIXED
     if args.num_tokens:
@@ -380,6 +382,7 @@ def measure(args) -> int:
                         continue
                     row = _run_point(payload)
                     row["device"] = tag
+                    row["sm_count"] = sm
                     w.writerow(row)
                     f.flush()
                     blabel = "ref" if job["mode"] == "reference" else f"B={job['batch_chunk_size']}"
@@ -398,6 +401,10 @@ def _load(out: Path) -> list[dict]:
     with open(out) as f:
         for r in csv.DictReader(f):
             r["device"] = r.get("device") or "unknown"
+            try:
+                r["sm_count"] = int(r.get("sm_count") or 0)
+            except ValueError:
+                r["sm_count"] = 0
             for k in ("num_tokens", "in_features", "num_classes"):
                 r[k] = int(r[k])
             r["batch_chunk_size"] = int(r["batch_chunk_size"])
@@ -439,6 +446,9 @@ def _fit_heuristics(summary: list[dict]) -> None:
     by_group: dict[tuple, list[dict]] = defaultdict(list)
     for s in summary:
         by_group[(s["dtype"], s["device"])].append(s)
+    # Prefer the hardware-stamped SM count; fall back to the table for older
+    # CSVs that predate the sm_count column.
+    sm_by_device = {s["device"]: s["sm_count"] for s in summary if s.get("sm_count")}
     const_by_device: dict[str, float] = {}
     for (dt, dev), pts in sorted(by_group.items()):
         if len(pts) < 2:
@@ -473,7 +483,7 @@ def _fit_heuristics(summary: list[dict]) -> None:
         print("\nCross-device constant (is the saturation B portable?):")
         print(f"  {'device':>28} {'const B':>9} {'SM':>5} {'B/SM':>8}")
         for dev, c in sorted(const_by_device.items()):
-            sm = _sm_count(dev)
+            sm = sm_by_device.get(dev) or _sm_count(dev)
             bsm = f"{c / sm:>8.2f}" if sm else f"{'?':>8}"
             print(f"  {dev:>28} {c:>9.4g} {(sm if sm else '?'):>5} {bsm}")
         print("  If 'const B' differs across devices but 'B/SM' is ~flat, the "
@@ -516,6 +526,7 @@ def analyze(args) -> int:
               f"{mem_knee:>9.3f} {mem_ref:>9.3f} {ok:>7}")
         summary.append({
             "N": N, "D": D, "V": V, "dtype": dt, "device": dev,
+            "sm_count": knee.get("sm_count", 0),
             "B_knee": knee["batch_chunk_size"], "mem_knee": mem_knee, "mem_ref": mem_ref,
         })
 
