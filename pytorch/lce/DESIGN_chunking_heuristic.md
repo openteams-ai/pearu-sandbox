@@ -63,6 +63,16 @@ Pick one tolerance as a one-time policy decision; quote/measure `k` at `tol >= 0
 Replace the `eps`/threshold logic with the `k * SM_count` rule above, or retire #187271 in favor of it.
 The budget regime is outside the LLM-typical range, so there is no urgency; the throughput-proven heuristic is the better long-term answer and could supersede the budget method entirely.
 
+## Device scope and terminology
+
+The `k * SM_count` rule is CUDA-specific and was measured only on CUDA bf16; it slots into the existing CUDA branch of the `auto` resolver, and non-CUDA devices keep their current `aspect_ratio` default unchanged (no regression).
+`B_knee` is shape-independent and tracks hardware parallelism, so it cannot be faithfully re-expressed as a function of `N`, `D`, or `V` -- the shape-form fits (`c*N`, `c*V`, `c*N*V/D`) were the worst candidates; the only honest generalization replaces `SM_count` with a device's parallel-unit/locality measure, which is hardware, not shape, and must be measured per backend.
+Correctness does not depend on the choice: chunk size is invariant up to floating-point rounding (the fp64 invariance test), so a non-optimal chunk size on a non-CUDA device costs throughput only, never accuracy.
+ROCm/AMD transfers the form -- HIP exposes `multi_processor_count` through the `torch.cuda` API -- but needs its own measured `k` (CDNA matrix cores differ; do not reuse the NVIDIA values); XPU and MPS expose different descriptors and each need their own measurement.
+CPU is expected to follow a different mechanism (chunk-size optimum is cache-residency-bound, not wave-saturation-bound), so `k * cores` is not assumed; CPU and other backends stay on `aspect_ratio` until there is demand and a measured result.
+
+Terminology: "budget" named the `eps=1` memory-budget approach; the throughput-saturation rule is not a budget, so the CUDA pick should fold into `auto` (or be renamed, e.g. `sm_saturation`) rather than be surfaced as a user-facing `budget` method.
+
 ## Caveats and future work
 
 Measured for bf16 only; fp16 and fp32-accumulation paths may use different GEMM tiles and so a different `k` -- measure before assuming.
