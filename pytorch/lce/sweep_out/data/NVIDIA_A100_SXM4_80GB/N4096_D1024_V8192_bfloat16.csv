@@ -1,0 +1,13 @@
+label,acc_policy,chunking_method,acc_dtype,num_tokens,in_features,num_classes,dtype,device_type,reduction,prob_target,bias,allow_retain_graph,time_ms,memory_peak_bytes,grad_input_error,grad_linear_weight_error,grad_linear_bias_error,error,timing_error
+reference,,,,4096,1024,8192,bfloat16,cuda,mean,False,False,False,1.521664023399353,310674432,0.0016911085037109885,0.0016880568017611879,nan,,
+accurate_aspect_ratio_fp32,accurate,aspect_ratio,float32,4096,1024,8192,bfloat16,cuda,mean,False,False,False,12.484607696533203,170222080,0.001660311802883144,0.0034367916010127867,nan,,
+accurate_aspect_ratio:2_fp32,accurate,aspect_ratio:2,float32,4096,1024,8192,bfloat16,cuda,mean,False,False,False,14.314496040344238,160782848,0.0016603118039328184,0.004517402536219451,nan,,
+accurate_aspect_ratio:4_fp32,accurate,aspect_ratio:4,float32,4096,1024,8192,bfloat16,cuda,mean,False,False,False,14.919679641723633,156063232,0.0016603118030745231,0.005729084787540954,nan,,
+balanced_aspect_ratio_fp32,balanced,aspect_ratio,float32,4096,1024,8192,bfloat16,cuda,mean,False,False,False,7.919616222381592,136667648,0.001661228568488503,0.0034367916010127867,nan,,
+balanced_aspect_ratio:2_fp32,balanced,aspect_ratio:2,float32,4096,1024,8192,bfloat16,cuda,mean,False,False,False,9.587712287902832,118839808,0.00166105507688626,0.004517402536219451,nan,,
+balanced_aspect_ratio:4_fp32,balanced,aspect_ratio:4,float32,4096,1024,8192,bfloat16,cuda,mean,False,False,False,13.079551696777344,109925888,0.0016609495078662995,0.005729084787540954,nan,,
+compact_aspect_ratio_fp32,compact,aspect_ratio,float32,4096,1024,8192,bfloat16,cuda,mean,False,False,False,3.664896011352539,103113216,0.001661228568488503,0.0035712274697587377,nan,,
+compact_aspect_ratio:2_fp32,compact,aspect_ratio:2,float32,4096,1024,8192,bfloat16,cuda,mean,False,False,False,6.437888145446777,85285376,0.00166105507688626,0.004617194934988898,nan,,
+compact_aspect_ratio:4_fp32,compact,aspect_ratio:4,float32,4096,1024,8192,bfloat16,cuda,mean,False,False,False,11.918335914611816,76371456,0.0016609495078662995,0.005801926371471339,nan,,
+auto_fp32,auto,auto,float32,4096,1024,8192,bfloat16,cuda,mean,False,False,False,3.5389440059661865,103113216,0.001661228568488503,0.003571050027564416,nan,,
+liger,,,,4096,1024,8192,bfloat16,cuda,mean,False,False,False,3.086848020553589,126144512,0.00235640130639188,0.0037992655769214945,nan,,
