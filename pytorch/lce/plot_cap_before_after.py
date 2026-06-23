@@ -96,11 +96,10 @@ def main():
     # V >> D), so the time cost there is the intended tradeoff, not a regression.
     # It sits at the high-D end of an in_features sweep, the low-V end of a
     # num_classes sweep.
-    lo, hi = min(xs_all), max(xs_all)
-    if args.x_axis == "in_features":
-        span = (max(args.num_classes, lo), hi) if hi >= args.num_classes else None
-    else:
-        span = (lo, min(args.in_features, hi)) if lo <= args.in_features else None
+    budget_xs = [x for x in xs_all
+                 if int(by_x[x]["reference"]["in_features"])
+                 >= int(by_x[x]["reference"]["num_classes"])]
+    span = (min(budget_xs), max(budget_xs)) if len(budget_xs) >= 2 else None
     for ax in (ax_mem, ax_t):
         ax.set_xscale("log", base=2)
         ax.grid(True, alpha=0.3)
