@@ -64,6 +64,34 @@ def _cpu_device_name() -> str:
     return "cpu"
 
 
+def _env_info(device_type: str) -> dict:
+    """GPU / CUDA-toolkit / driver versions, stamped into every CSV row so a
+    plot can never silently mix runs from different (cuBLAS-version-sensitive)
+    environments. cuBLAS workspace/algorithm choices vary by CUDA version, so
+    memory and time are only comparable within one (gpu, cuda, driver) combo.
+    """
+    if device_type != "cuda" or not torch.cuda.is_available():
+        return {"gpu_name": _cpu_device_name() if device_type == "cpu" else "",
+                "cuda_version": "", "driver_version": ""}
+    driver = ""
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        v = pynvml.nvmlSystemGetDriverVersion()
+        driver = v.decode() if isinstance(v, bytes) else str(v)
+    except Exception:
+        try:
+            import subprocess
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=5).stdout.strip()
+            driver = out.splitlines()[0].strip() if out else ""
+        except Exception:
+            driver = ""
+    return {"gpu_name": torch.cuda.get_device_name(0),
+            "cuda_version": torch.version.cuda or "", "driver_version": driver}
+
+
 # ---------------------------------------------------------------------------
 # CUDA peak memory tracking (absolute)
 # ---------------------------------------------------------------------------
@@ -549,6 +577,7 @@ def _worker_main(payload: dict) -> None:
         "bias": bias,
         "allow_retain_graph": payload["allow_retain_graph"],
     }
+    result.update(_env_info(device_type))
     if timing_error is not None:
         result["timing_error"] = timing_error
     print(json.dumps(result))
@@ -673,6 +702,9 @@ def main() -> int:
             "num_classes",
             "dtype",
             "device_type",
+            "gpu_name",
+            "cuda_version",
+            "driver_version",
             "reduction",
             "prob_target",
             "bias",

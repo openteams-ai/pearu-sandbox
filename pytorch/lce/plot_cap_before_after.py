@@ -49,6 +49,8 @@ def main():
     p.add_argument("--num-tokens", type=int, default=4096)
     p.add_argument("--num-classes", type=int, default=8192, help="fixed V (when x-axis=in_features)")
     p.add_argument("--in-features", type=int, default=4096, help="fixed D (when x-axis=num_classes)")
+    p.add_argument("--env", default=None,
+                   help="'GPU | CUDA x | driver y' stamp for CSVs lacking env metadata")
     args = p.parse_args()
     suffix = "_fp32" if args.dtype in ("bfloat16", "float16") else ""
 
@@ -65,6 +67,7 @@ def main():
         raise SystemExit(f"no CSVs match {pattern} under {args.data_dir}")
 
     device = ""
+    envs = set()
     by_x: dict[int, dict[str, dict]] = {}
     for f in files:
         rows = {r["label"]: r for r in csv.DictReader(open(f))}
@@ -72,8 +75,27 @@ def main():
         if ref is None:
             continue
         device = ref["device_type"]
+        envs.add((ref.get("gpu_name", ""), ref.get("cuda_version", ""),
+                  ref.get("driver_version", "")))
         by_x[int(ref[args.x_axis])] = rows
     xs_all = sorted(by_x)
+
+    # Never mix runs from different (gpu, cuda, driver) environments on one
+    # figure -- cuBLAS workspace/algorithm choices vary by version, so memory
+    # and time are only comparable within a single combo.
+    envs.discard(("", "", ""))
+    if len(envs) > 1:
+        raise SystemExit("refusing to plot: CSVs span multiple (gpu, cuda, "
+                         "driver) environments; cannot mix on one figure:\n  "
+                         + "\n  ".join(str(e) for e in sorted(envs)))
+    if envs:
+        gpu, cuda, drv = next(iter(envs))
+        env_stamp = f"{gpu} | CUDA {cuda} | driver {drv}"
+    elif args.env:
+        env_stamp = args.env
+    else:
+        raise SystemExit("CSVs have no env metadata (pre-dating env recording);"
+                         " pass --env 'GPU | CUDA x | driver y' to stamp the figure")
 
     fig, (ax_mem, ax_t) = plt.subplots(2, 1, figsize=(9, 8), sharex=True)
     for key, legend, color, ls, marker in SERIES:
@@ -118,6 +140,8 @@ def main():
                      f"after (auto) maximizes throughput in the vocab regime, "
                      f"stays <= reference everywhere")
     ax_mem.legend(fontsize=8)
+    fig.text(0.99, 0.005, env_stamp, ha="right", va="bottom",
+             color="dimgray", fontsize=7)
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
