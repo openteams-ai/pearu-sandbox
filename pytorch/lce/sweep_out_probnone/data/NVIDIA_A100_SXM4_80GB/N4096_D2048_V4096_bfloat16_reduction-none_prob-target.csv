@@ -1,12 +1,66 @@
 label,acc_policy,chunking_method,acc_dtype,num_tokens,in_features,num_classes,dtype,device_type,gpu_name,cuda_version,driver_version,reduction,prob_target,bias,allow_retain_graph,time_ms,memory_peak_bytes,grad_input_error,grad_linear_weight_error,grad_linear_bias_error,error,timing_error
 reference,,,,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,1.4366719722747803,218375168,0.00831360979537529,0.008163804660383914,nan,,
-accurate_aspect_ratio_fp32,accurate,aspect_ratio,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,10.789888381958008,302286848,0.001656281342941661,0.0019677974188784786,nan,,
-accurate_aspect_ratio:2_fp32,accurate,aspect_ratio:2,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,10.686464309692383,260331520,0.0016562811264369424,0.002499211781036426,nan,,
-accurate_aspect_ratio:4_fp32,accurate,aspect_ratio:4,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,11.333632469177246,239353856,0.0016562810350987107,0.003324505589254903,nan,,
-balanced_aspect_ratio_fp32,balanced,aspect_ratio,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,6.657023906707764,251955200,0.0021181594760737734,0.0019677974188784786,nan,,
-balanced_aspect_ratio:2_fp32,balanced,aspect_ratio:2,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,8.345600128173828,201611264,0.0026230554483201063,0.002499211781036426,nan,,
-balanced_aspect_ratio:4_fp32,balanced,aspect_ratio:4,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,9.5098876953125,176439296,0.0021181594760737734,0.003324505589254903,nan,,
-compact_aspect_ratio_fp32,compact,aspect_ratio,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,3.0494720935821533,218400768,0.0021181594760737734,0.0023688985672058187,nan,,
-compact_aspect_ratio:2_fp32,compact,aspect_ratio:2,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,3.7908480167388916,168056832,0.0026230554483201063,0.0028257327673708987,nan,,
-compact_aspect_ratio:4_fp32,compact,aspect_ratio:4,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,5.3288960456848145,142884864,0.0021181594760737734,0.0035762379678082453,nan,,
-auto_fp32,auto,auto,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,3.4856960773468018,218400768,0.0021181594760737734,0.0023688985672058187,nan,,
+accurate_aspect_ratio_fp32,accurate,aspect_ratio,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,11.807744026184082,302286336,0.001656281342941661,0.0019677974188784786,nan,,
+accurate_aspect_ratio:2_fp32,accurate,aspect_ratio:2,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,12.329983711242676,260331008,0.0016562811264369424,0.002499211781036426,nan,,
+accurate_aspect_ratio:4_fp32,accurate,aspect_ratio:4,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,12.85427188873291,239353344,0.0016562810350987107,0.003324505589254903,nan,,
+balanced_aspect_ratio_fp32,balanced,aspect_ratio,float32,4096,2048,4096,bfloat16,cuda,,,,none,True,False,False,,,,,,"Traceback (most recent call last):
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 722, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 634, in main
+    _worker_main(json.loads(args.worker))
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 396, in _worker_main
+    options = LinearCrossEntropyOptions(
+        acc_policy=payload[""acc_policy""],
+    ...<2 lines>...
+        allow_retain_graph=payload[""allow_retain_graph""],
+    )
+  File ""<string>"", line 8, in __init__
+  File ""/home/pearu/git/pytorch/pytorch/torch/nn/modules/linear_cross_entropy_options.py"", line 143, in __post_init__
+    raise ValueError(
+    ...<2 lines>...
+    )
+ValueError: invalid acc_policy: 'balanced'; expected one of 'auto', 'accurate', 'compact'",
+balanced_aspect_ratio:2_fp32,balanced,aspect_ratio:2,float32,4096,2048,4096,bfloat16,cuda,,,,none,True,False,False,,,,,,"Traceback (most recent call last):
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 722, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 634, in main
+    _worker_main(json.loads(args.worker))
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 396, in _worker_main
+    options = LinearCrossEntropyOptions(
+        acc_policy=payload[""acc_policy""],
+    ...<2 lines>...
+        allow_retain_graph=payload[""allow_retain_graph""],
+    )
+  File ""<string>"", line 8, in __init__
+  File ""/home/pearu/git/pytorch/pytorch/torch/nn/modules/linear_cross_entropy_options.py"", line 143, in __post_init__
+    raise ValueError(
+    ...<2 lines>...
+    )
+ValueError: invalid acc_policy: 'balanced'; expected one of 'auto', 'accurate', 'compact'",
+balanced_aspect_ratio:4_fp32,balanced,aspect_ratio:4,float32,4096,2048,4096,bfloat16,cuda,,,,none,True,False,False,,,,,,"Traceback (most recent call last):
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 722, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 634, in main
+    _worker_main(json.loads(args.worker))
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""/home/pearu/git/openteams-ai/pearu-sandbox/pytorch/lce/lce_benchmark.py"", line 396, in _worker_main
+    options = LinearCrossEntropyOptions(
+        acc_policy=payload[""acc_policy""],
+    ...<2 lines>...
+        allow_retain_graph=payload[""allow_retain_graph""],
+    )
+  File ""<string>"", line 8, in __init__
+  File ""/home/pearu/git/pytorch/pytorch/torch/nn/modules/linear_cross_entropy_options.py"", line 143, in __post_init__
+    raise ValueError(
+    ...<2 lines>...
+    )
+ValueError: invalid acc_policy: 'balanced'; expected one of 'auto', 'accurate', 'compact'",
+compact_aspect_ratio_fp32,compact,aspect_ratio,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,3.0013439655303955,218400256,0.0021181594760737734,0.0023688985672058187,nan,,
+compact_aspect_ratio:2_fp32,compact,aspect_ratio:2,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,3.670016050338745,168056320,0.0026230554483201063,0.0028257327673708987,nan,,
+compact_aspect_ratio:4_fp32,compact,aspect_ratio:4,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,4.477952003479004,142884352,0.0021181594760737734,0.0035762379678082453,nan,,
+auto_fp32,auto,auto,float32,4096,2048,4096,bfloat16,cuda,NVIDIA A100-SXM4-80GB,13.1,580.126.09,none,True,False,False,3.1385600566864014,218400256,0.0021181594760737734,0.0023688985672058187,nan,,
