@@ -600,9 +600,8 @@ def _parse_args():
         "--prob-target",
         action="store_true",
         help="use a probability (soft-label) target of shape (N, V) at the "
-        "input dtype instead of class indices. Requires reduction mean/sum "
-        "(the chunked path falls back on none). The liger baseline is "
-        "skipped (index targets only).",
+        "input dtype instead of class indices. Supports reduction "
+        "mean/sum/none. The liger baseline is skipped (index targets only).",
     )
     p.add_argument(
         "--bias",
@@ -644,15 +643,6 @@ def main() -> int:
         dtypes = ["float16", "bfloat16"]
     else:
         dtypes = [args.dtype]
-
-    if args.prob_target and args.reduction == "none":
-        print(
-            "error: --prob-target requires --reduction mean/sum (the chunked "
-            "path falls back to the reference on none, so the benchmark "
-            "would silently measure the reference)",
-            file=sys.stderr,
-        )
-        return 1
 
     # Liger's fused linear cross entropy supports index targets only.
     has_liger = (

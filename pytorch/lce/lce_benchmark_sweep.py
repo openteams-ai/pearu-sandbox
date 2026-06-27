@@ -340,8 +340,8 @@ def _parse_args():
     p.add_argument(
         "--prob-target",
         action="store_true",
-        help="benchmark with a probability (soft-label) target; requires "
-        "reduction mean/sum, no liger baseline (index targets only)",
+        help="benchmark with a probability (soft-label) target; supports "
+        "reduction mean/sum/none, no liger baseline (index targets only)",
     )
     p.add_argument(
         "--bias",
