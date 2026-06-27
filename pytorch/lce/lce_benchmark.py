@@ -204,7 +204,7 @@ def _build_configs(dtype: str, include_acc_none: bool = False) -> list[Config]:
     emit_acc_none = include_acc_none or not fp32_acc
     # Sweep the aspect_ratio factors that bracket auto's resolved pick
     # (plot_auto_dispatch shows auto plus its two aspect_ratio neighbors).
-    for policy in ("accurate", "balanced", "compact"):
+    for policy in ("accurate", "compact"):
         for cm in ("aspect_ratio", "aspect_ratio:2", "aspect_ratio:4"):
             if emit_acc_none:
                 cfgs.append(Config(f"{policy}_{cm}", policy, cm))
