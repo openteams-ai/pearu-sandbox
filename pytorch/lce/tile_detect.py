@@ -119,12 +119,34 @@ def analyze(Ms, gemm_nspr, op_nspr, m_step, m_max):
 
     o_knee = next(Ms[i] for i in range(len(op_nspr)) if op_nspr[i] <= 1.10 * min(op_nspr))
     o_argmin = Ms[int(np.argmin(op_nspr))]
+
+    # Practical mis-alignment penalty: fold the op ripple over the tile period in
+    # the useful (large-M) tail and take the peak-to-peak of the phase-binned
+    # means, as % of the per-row floor. Drift cancels within each phase bin (each
+    # bin spans all periods), so this isolates the sawtooth amplitude -- the cost
+    # of landing off a tile multiple at a useful chunk size. This is the decision
+    # axis: a regular tile with ~0% penalty (e.g. Blackwell) is not worth aligning.
+    ripple_penalty_pct = None
+    if T and gemm_regular:  # folding over a bogus period would be meaningless
+        half = len(Ms) // 2
+        tailM, tail_res = M[half:], o_res[half:]
+        floor = float(np.median(np.array(op_nspr)[half:]))
+        ph = (tailM % T) / T
+        means = []
+        for i in range(8):
+            sel = tail_res[(ph >= i / 8) & (ph < (i + 1) / 8)]
+            if sel.size:
+                means.append(float(sel.mean()))
+        if len(means) >= 2 and floor > 0:
+            ripple_penalty_pct = round((max(means) - min(means)) / floor * 100, 1)
+
     # A tile is only "tracked" if the GEMM has a regular sawtooth AND the op's
     # differenced ripple co-moves with it -- no tile, nothing to track.
     tracks = gemm_regular and not np.isnan(r) and r > 0.3
     rs = "nan" if np.isnan(r) else f"{r:.2f}"
     if tracks:
-        verdict = f"op TRACKS the GEMM tile T={T} (ripple r={rs}, op period {o_period})"
+        pen = "" if ripple_penalty_pct is None else f", ~{ripple_penalty_pct}% mis-align penalty"
+        verdict = f"op TRACKS the GEMM tile T={T} (ripple r={rs}{pen})"
     elif not gemm_regular:
         verdict = (f"no significant GEMM tile (sawtooth strength {g_strength:.2f}); "
                    f"per-row smooth, chunk size not tile-sensitive")
@@ -147,6 +169,7 @@ def analyze(Ms, gemm_nspr, op_nspr, m_step, m_max):
         "op_trend_a": float(o_a),
         "op_trend_b": float(o_b),
         "ripple_corr_r": None if np.isnan(r) else round(r, 4),
+        "ripple_penalty_pct": ripple_penalty_pct,
         "tile_multiple_advantage_ns": None if align is None else round(align, 1),
         "argmin_mod_T": (o_argmin % T) if T else None,
         "op_tracks_gemm_tile": bool(tracks),

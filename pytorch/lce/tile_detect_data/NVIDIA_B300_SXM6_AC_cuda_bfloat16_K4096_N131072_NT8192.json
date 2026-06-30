@@ -382,5 +382,6 @@
   "tile_multiple_advantage_ns": -72.3,
   "argmin_mod_T": 320,
   "op_tracks_gemm_tile": false,
-  "verdict": "no significant GEMM tile (sawtooth strength -0.04); per-row smooth, chunk size not tile-sensitive"
+  "verdict": "no significant GEMM tile (sawtooth strength -0.04); per-row smooth, chunk size not tile-sensitive",
+  "ripple_penalty_pct": null
 }

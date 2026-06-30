@@ -64,16 +64,16 @@ def main():
 
     recs.sort(key=lambda r: (r["device_name"], r["dtype"], r["N"], r["K"]))
     hdr = ["device", "cc", "sm", "dtype", "K", "N", "NT",
-           "GEMM_T", "reg", "op_period", "argmin", "r", "tracks"]
-    w = [23, 5, 4, 9, 7, 8, 7, 8, 5, 11, 8, 7, 8]
+           "GEMM_T", "reg", "op_period", "r", "pen%", "tracks"]
+    w = [23, 5, 4, 9, 7, 8, 7, 8, 5, 11, 7, 7, 8]
     print("".join(h.rjust(c) for h, c in zip(hdr, w)))
     for r in recs:
         row = [r["device_name"][:22], cc(r), str(r.get("sm_count", "-")),
                r["dtype"], r["K"], r["N"], r["NT"],
                fmt(r["gemm_tile_T"]),
                "yes" if r.get("gemm_tile_regular") else "no",
-               fmt(r["op_ripple_period"]), fmt(r["op_argmin"]),
-               fmt(r["ripple_corr_r"]),
+               fmt(r["op_ripple_period"]), fmt(r["ripple_corr_r"]),
+               fmt(r.get("ripple_penalty_pct")),
                "yes" if r["op_tracks_gemm_tile"] else "no"]
         print("".join(str(v).rjust(c) for v, c in zip(row, w)))
 
@@ -84,13 +84,12 @@ def main():
         rrange = f"[{min(rs):.2f}, {max(rs):.2f}]" if rs else "n/a"
         print(f"\nGPU runs: {len(gpu)} | op-tracks-tile {tracks}/{len(gpu)} | "
               f"r in {rrange}")
-        by_cc = {}
-        for r in gpu:
-            if r.get("gemm_tile_regular"):  # only clean tiles inform the cc->tile map
-                by_cc.setdefault(cc(r), set()).add(r["gemm_tile_T"])
-        if by_cc:
-            print("  GEMM tile by compute capability (regular sawtooths only): "
-                  + ", ".join(f"cc{k}->{sorted(v)}" for k, v in sorted(by_cc.items())))
+        reg = [r for r in gpu if r.get("gemm_tile_regular")]
+        if reg:
+            print("  regular-sawtooth tiles (cc, shape -> tile, mis-align penalty):")
+            for r in sorted(reg, key=lambda r: (cc(r), r["N"], r["K"])):
+                print(f"    cc{cc(r):<4} N={r['N']:<7} K={r['K']:<5} -> tile "
+                      f"{r['gemm_tile_T']:<4} ~{fmt(r.get('ripple_penalty_pct'))}% penalty")
 
 
 if __name__ == "__main__":

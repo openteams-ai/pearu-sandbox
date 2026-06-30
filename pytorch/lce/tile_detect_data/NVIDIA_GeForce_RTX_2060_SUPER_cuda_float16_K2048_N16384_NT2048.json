@@ -168,9 +168,10 @@
   "tile_multiple_advantage_ns": 1015.4,
   "argmin_mod_T": 0,
   "op_tracks_gemm_tile": true,
-  "verdict": "op TRACKS the GEMM tile T=64 (ripple r=0.94, op period 64)",
+  "verdict": "op TRACKS the GEMM tile T=64 (ripple r=0.94, ~9.6% mis-align penalty)",
   "gemm_tile_regular": true,
   "gemm_ripple_strength": 0.466,
   "gemm_trough_period": 64,
-  "op_ripple_strength": 0.23
+  "op_ripple_strength": 0.23,
+  "ripple_penalty_pct": 9.6
 }
