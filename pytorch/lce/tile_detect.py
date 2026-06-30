@@ -10,10 +10,12 @@ Sweeps ONE chunk-size grid ``M`` and at each ``M`` measures BOTH:
   -- the real per-row curve, which falls as roughly ``a + b/M`` plus a ripple.
 
 It then reports each curve's structure and, crucially, **whether the op tracks
-the GEMM tile**: it detrends both (subtracts the ``a + b/M`` fit) and correlates
-the residual ripples, and checks whether the op's per-row minima land on
-multiples of the GEMM tile. This is the GPU GEMM<->op connection we want data on
-across devices (2060, A100, H100, B200, MI300, ...).
+the GEMM tile**: it detrends both (subtracts the ``a + b/M`` fit), reads the
+GEMM tile from the autocorrelation of its sawtooth (flagging it irregular if the
+ripple is weak), and correlates the *differenced* residuals so a shared slow
+drift cannot fake a link. ``tracks`` requires a regular GEMM sawtooth that the
+op co-moves with. This is the GPU GEMM<->op connection we want data on across
+devices (2060, A100, H100, B200, MI300, ...).
 
 Run on each device; collect the printed SUMMARY block + the PNG. The summary is
 one pasteable line group per (device, dtype, shape).
@@ -94,7 +96,16 @@ def analyze(Ms, gemm_nspr, op_nspr, m_step, m_max):
     trough_period = int(statistics.median(spac)) if spac else None
 
     o_period, o_strength = _autocorr_period(o_res, m_step)
-    r = float(np.corrcoef(g_res, o_res)[0, 1]) if len(Ms) > 2 else float("nan")
+    # Correlate the SHORT-SCALE ripples only: difference the residuals first so a
+    # shared slow drift (curvature the a+b/M fit leaves behind) cannot inflate r.
+    # On a tiled device the per-tile sawtooth jumps co-move (high r); on a device
+    # whose GEMM is flat (no tile in this M range, e.g. Blackwell) the differences
+    # are just noise and r stays low -- the raw-residual correlation was fooled by
+    # the shared drift there.
+    if len(Ms) > 3:
+        r = float(np.corrcoef(np.diff(g_res), np.diff(o_res))[0, 1])
+    else:
+        r = float("nan")
 
     # Grid-agnostic tile advantage: op residual near a tile multiple (phase in
     # [0,0.2)U(0.8,1)) vs mid-tile (phase in (0.3,0.7)). >0 => cheaper aligned.
@@ -108,16 +119,19 @@ def analyze(Ms, gemm_nspr, op_nspr, m_step, m_max):
 
     o_knee = next(Ms[i] for i in range(len(op_nspr)) if op_nspr[i] <= 1.10 * min(op_nspr))
     o_argmin = Ms[int(np.argmin(op_nspr))]
-    tracks = not np.isnan(r) and (r > 0.3 or (align is not None and align > 0))
+    # A tile is only "tracked" if the GEMM has a regular sawtooth AND the op's
+    # differenced ripple co-moves with it -- no tile, nothing to track.
+    tracks = gemm_regular and not np.isnan(r) and r > 0.3
     rs = "nan" if np.isnan(r) else f"{r:.2f}"
-    if T and gemm_regular and tracks:
-        verdict = f"op TRACKS the GEMM tile T={T} (r={rs}, op ripple period {o_period})"
+    if tracks:
+        verdict = f"op TRACKS the GEMM tile T={T} (ripple r={rs}, op period {o_period})"
     elif not gemm_regular:
-        verdict = f"GEMM ripple weak/irregular (strength {g_strength:.2f}); op link r={rs}"
+        verdict = (f"no significant GEMM tile (sawtooth strength {g_strength:.2f}); "
+                   f"per-row smooth, chunk size not tile-sensitive")
     elif max(op_nspr) <= 1.15 * min(op_nspr):
         verdict = "op per-row ~flat over the grid; tile not critical"
     else:
-        verdict = f"NO clean GEMM<->op link (r={rs}); op knee={o_knee}"
+        verdict = f"GEMM tile T={T} present but op does not track it (ripple r={rs})"
 
     return {
         "gemm_tile_T": T,
@@ -242,7 +256,7 @@ def main():
     print(f"  => {d['verdict']}")
 
     record = {
-        "schema": 2,
+        "schema": 3,
         "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "device_name": name,
         "device_type": dev,

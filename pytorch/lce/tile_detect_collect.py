@@ -44,7 +44,7 @@ def main():
         for path, r in zip(paths, recs):
             r.update(analyze(r["Ms"], r["gemm_nspr"], r["op_nspr"],
                              r.get("m_step", 16), r.get("m_max", max(r["Ms"]))))
-            r["schema"] = 2
+            r["schema"] = 3
             with open(path, "w") as f:
                 json.dump(r, f, indent=2)
         print(f"re-derived {len(recs)} record(s) from raw\n")
