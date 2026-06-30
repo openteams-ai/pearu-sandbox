@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "timestamp_utc": "2026-06-30T12:38:12.659222+00:00",
   "device_name": "NVIDIA A100-SXM4-80GB",
   "device_type": "cuda",
@@ -364,12 +364,16 @@
   "gemm_ripple_ns": 5010.1015878353355,
   "op_knee": 496,
   "op_argmin": 1024,
-  "op_ripple_period": 48,
-  "op_trend_a": 12506.204118235459,
-  "op_trend_b": 2596471.583254977,
-  "ripple_corr_r": 0.975601004096019,
-  "tile_multiple_advantage_ns": 521.49233816275,
+  "op_ripple_period": 128,
+  "op_trend_a": 12506.204118235466,
+  "op_trend_b": 2596471.583254976,
+  "ripple_corr_r": 0.9756,
+  "tile_multiple_advantage_ns": -253.2,
   "argmin_mod_T": 0,
   "op_tracks_gemm_tile": true,
-  "verdict": "op TRACKS the GEMM tile T=128 (ripple r=0.98)"
+  "verdict": "op TRACKS the GEMM tile T=128 (r=0.98, op ripple period 128)",
+  "gemm_tile_regular": true,
+  "gemm_ripple_strength": 0.4,
+  "gemm_trough_period": 128,
+  "op_ripple_strength": 0.391
 }

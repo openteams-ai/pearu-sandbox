@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "timestamp_utc": "2026-06-30T12:12:50.229657+00:00",
   "device_name": "NVIDIA GeForce RTX 2060 SUPER",
   "device_type": "cuda",
@@ -164,9 +164,13 @@
   "op_ripple_period": 64,
   "op_trend_a": 7007.841460195234,
   "op_trend_b": 636048.0894826206,
-  "ripple_corr_r": 0.917006941490207,
-  "tile_multiple_advantage_ns": 1015.4145491686244,
+  "ripple_corr_r": 0.917,
+  "tile_multiple_advantage_ns": 1015.4,
   "argmin_mod_T": 0,
   "op_tracks_gemm_tile": true,
-  "verdict": "op TRACKS the GEMM tile T=64 (ripple r=0.92)"
+  "verdict": "op TRACKS the GEMM tile T=64 (r=0.92, op ripple period 64)",
+  "gemm_tile_regular": true,
+  "gemm_ripple_strength": 0.466,
+  "gemm_trough_period": 64,
+  "op_ripple_strength": 0.23
 }

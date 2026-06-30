@@ -52,10 +52,92 @@ def _troughs(Ms, vals):
             if vals[i] <= vals[i - 1] and vals[i] < vals[i + 1]]
 
 
-def _period(Ms, idxs):
-    if len(idxs) < 2:
-        return None
-    return int(statistics.median([Ms[b] - Ms[a] for a, b in zip(idxs, idxs[1:])]))
+def _autocorr_period(resid, m_step):
+    """Dominant period of a detrended ripple via autocorrelation. Returns
+    ``(period_in_M_units, strength)`` where strength is the normalized
+    autocorrelation at that lag (0..1; ~>0.25 means a clean repeating ripple,
+    low means noise / no single period). Robust where local-minima spacing is
+    not -- spurious minima don't move the autocorrelation peak."""
+    x = np.asarray(resid, float)
+    n = len(x)
+    if n < 8:
+        return None, 0.0
+    x = x - x.mean()
+    ac = np.correlate(x, x, mode="full")[n - 1:]
+    if ac[0] == 0:
+        return None, 0.0
+    ac = ac / ac[0]
+    hi = max(3, n // 2)
+    # The period is the first LOCAL maximum past lag 0, not the global argmax:
+    # near lag 0 the autocorrelation sits on the lag-0 shoulder (adjacent points
+    # share the within-tile slope), so argmax would return ~1 grid step. Pick
+    # the strongest interior local maximum instead.
+    peaks = [k for k in range(1, hi - 1) if ac[k] > ac[k - 1] and ac[k] >= ac[k + 1]]
+    if not peaks:
+        return None, 0.0
+    k = max(peaks, key=lambda j: ac[j])
+    return k * m_step, float(ac[k])
+
+
+def analyze(Ms, gemm_nspr, op_nspr, m_step, m_max):
+    """Derive all tile/connection metrics from the raw sweep. Pure function of
+    the arrays so live runs and re-derivation from saved records share it."""
+    M = np.array(Ms, float)
+    _, _, g_res = _fit_trend(Ms, gemm_nspr)
+    o_a, o_b, o_res = _fit_trend(Ms, op_nspr)
+
+    # GEMM tile + regularity from the autocorrelation of the sawtooth ripple.
+    T, g_strength = _autocorr_period(g_res, m_step)
+    gemm_regular = T is not None and g_strength >= 0.25
+    trough_Ms = [Ms[i] for i in _troughs(Ms, gemm_nspr)]
+    spac = [b - a for a, b in zip(trough_Ms, trough_Ms[1:])]
+    trough_period = int(statistics.median(spac)) if spac else None
+
+    o_period, o_strength = _autocorr_period(o_res, m_step)
+    r = float(np.corrcoef(g_res, o_res)[0, 1]) if len(Ms) > 2 else float("nan")
+
+    # Grid-agnostic tile advantage: op residual near a tile multiple (phase in
+    # [0,0.2)U(0.8,1)) vs mid-tile (phase in (0.3,0.7)). >0 => cheaper aligned.
+    align = None
+    if T:
+        phase = (M % T) / T
+        near = o_res[(phase < 0.2) | (phase > 0.8)]
+        mid = o_res[(phase > 0.3) & (phase < 0.7)]
+        if near.size and mid.size:
+            align = float(mid.mean() - near.mean())
+
+    o_knee = next(Ms[i] for i in range(len(op_nspr)) if op_nspr[i] <= 1.10 * min(op_nspr))
+    o_argmin = Ms[int(np.argmin(op_nspr))]
+    tracks = not np.isnan(r) and (r > 0.3 or (align is not None and align > 0))
+    rs = "nan" if np.isnan(r) else f"{r:.2f}"
+    if T and gemm_regular and tracks:
+        verdict = f"op TRACKS the GEMM tile T={T} (r={rs}, op ripple period {o_period})"
+    elif not gemm_regular:
+        verdict = f"GEMM ripple weak/irregular (strength {g_strength:.2f}); op link r={rs}"
+    elif max(op_nspr) <= 1.15 * min(op_nspr):
+        verdict = "op per-row ~flat over the grid; tile not critical"
+    else:
+        verdict = f"NO clean GEMM<->op link (r={rs}); op knee={o_knee}"
+
+    return {
+        "gemm_tile_T": T,
+        "gemm_tile_regular": gemm_regular,
+        "gemm_ripple_strength": round(g_strength, 3),
+        "gemm_trough_period": trough_period,
+        "gemm_troughs": trough_Ms,
+        "gemm_ripple_ns": float(max(g_res) - min(g_res)),
+        "op_knee": o_knee,
+        "op_argmin": o_argmin,
+        "op_ripple_period": o_period,
+        "op_ripple_strength": round(o_strength, 3),
+        "op_trend_a": float(o_a),
+        "op_trend_b": float(o_b),
+        "ripple_corr_r": None if np.isnan(r) else round(r, 4),
+        "tile_multiple_advantage_ns": None if align is None else round(align, 1),
+        "argmin_mod_T": (o_argmin % T) if T else None,
+        "op_tracks_gemm_tile": bool(tracks),
+        "verdict": verdict,
+    }
 
 
 def main():
@@ -147,46 +229,20 @@ def main():
     gemm_nspr = [u * 1e3 / m for u, m in zip(gemm_us, Ms)]
     op_nspr = [u * 1e3 / NT for u in op_us]
 
-    # Structure of each curve.
-    g_tro = _troughs(Ms, gemm_nspr)
-    T = _period(Ms, g_tro)
-    g_a, g_b, g_res = _fit_trend(Ms, gemm_nspr)
-    o_a, o_b, o_res = _fit_trend(Ms, op_nspr)
-    o_tro = _troughs(Ms, o_res.tolist())
-    T_op = _period(Ms, o_tro)
-    o_knee = next(Ms[i] for i in range(len(op_nspr))
-                  if op_nspr[i] <= 1.10 * min(op_nspr))
-    o_argmin = Ms[int(np.argmin(op_nspr))]
-
-    # Connection: correlate the two detrended ripples, and test whether the op
-    # is cheaper at GEMM-tile multiples than at mid-tile offsets.
-    r = float(np.corrcoef(g_res, o_res)[0, 1]) if len(Ms) > 2 else float("nan")
-    align = None
-    if T:
-        mult = {m for m in Ms if m % T == 0}
-        mid = {m for m in Ms if m % T == T // 2}
-        if mult and mid:
-            on = statistics.mean(o_res[Ms.index(m)] for m in mult)
-            off = statistics.mean(o_res[Ms.index(m)] for m in mid)
-            align = off - on  # > 0 means op cheaper on tile multiples
-    if T and not np.isnan(r) and (r > 0.3 or (align is not None and align > 0)):
-        verdict = f"op TRACKS the GEMM tile T={T} (ripple r={r:.2f})"
-    elif max(op_nspr) <= 1.15 * min(op_nspr):
-        verdict = "op per-row ~flat over the grid; tile not critical"
-    else:
-        verdict = f"NO clean GEMM<->op link (ripple r={r:.2f}); op knee={o_knee}"
-
+    d = analyze(Ms, gemm_nspr, op_nspr, args.m_step, args.m_max)
     print(f"\n# SUMMARY | {name} ({dev}) | {args.dtype} | K={K} N={N} NT={NT}")
-    print(f"  GEMM: tile T={T}  troughs@{g_tro and [Ms[i] for i in g_tro][:8]}  "
-          f"ripple={(max(g_res) - min(g_res)):.0f}ns")
-    print(f"  op  : knee={o_knee}  argmin={o_argmin}  ripple_period={T_op}  "
-          f"trend={o_a:.0f}+{o_b:.0f}/M")
-    print(f"  link: ripple_corr r={r:.2f}  tile-multiple_advantage={align}  "
-          f"argmin%T={o_argmin % T if T else None}")
-    print(f"  => {verdict}")
+    print(f"  GEMM: tile T={d['gemm_tile_T']} regular={d['gemm_tile_regular']} "
+          f"(strength {d['gemm_ripple_strength']})  troughs@{d['gemm_troughs'][:8]}")
+    print(f"  op  : knee={d['op_knee']} argmin={d['op_argmin']} "
+          f"ripple_period={d['op_ripple_period']} (strength {d['op_ripple_strength']})  "
+          f"trend={d['op_trend_a']:.0f}+{d['op_trend_b']:.0f}/M")
+    print(f"  link: ripple_corr r={d['ripple_corr_r']}  "
+          f"tile_advantage={d['tile_multiple_advantage_ns']}ns  "
+          f"argmin%T={d['argmin_mod_T']}")
+    print(f"  => {d['verdict']}")
 
     record = {
-        "schema": 1,
+        "schema": 2,
         "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "device_name": name,
         "device_type": dev,
@@ -198,17 +254,7 @@ def main():
         # raw sweep -- kept so future analysis can re-derive metrics
         "Ms": Ms, "gemm_us": gemm_us, "gemm_nspr": gemm_nspr,
         "op_us": op_us, "op_nspr": op_nspr,
-        # derived
-        "gemm_tile_T": T,
-        "gemm_troughs": [Ms[i] for i in g_tro],
-        "gemm_ripple_ns": float(max(g_res) - min(g_res)),
-        "op_knee": o_knee, "op_argmin": o_argmin, "op_ripple_period": T_op,
-        "op_trend_a": float(o_a), "op_trend_b": float(o_b),
-        "ripple_corr_r": r,
-        "tile_multiple_advantage_ns": align,
-        "argmin_mod_T": (o_argmin % T) if T else None,
-        "op_tracks_gemm_tile": verdict.startswith("op TRACKS"),
-        "verdict": verdict,
+        **d,
     }
     os.makedirs(args.data_dir, exist_ok=True)
     tag = name.replace(" ", "_").replace("(", "").replace(")", "")
@@ -217,14 +263,15 @@ def main():
         json.dump(record, f, indent=2)
     print(f"wrote {rpath}")
 
-    _plot(args, name, dev, K, N, NT, Ms, gemm_nspr, op_nspr,
-          g_a, g_b, o_a, o_b, o_res, T, g_tro, o_knee, o_argmin, r, verdict)
+    o_a, o_b, o_res = _fit_trend(Ms, op_nspr)
+    g_tro = _troughs(Ms, gemm_nspr)
+    _plot(args, name, dev, K, N, NT, Ms, gemm_nspr, op_nspr, o_a, o_b, o_res,
+          d["gemm_tile_T"], g_tro, d["op_knee"], d["op_argmin"],
+          d["ripple_corr_r"], d["verdict"])
 
 
-def _plot(args, name, dev, K, N, NT, Ms, gemm_nspr, op_nspr, g_a, g_b, o_a, o_b,
+def _plot(args, name, dev, K, N, NT, Ms, gemm_nspr, op_nspr, o_a, o_b,
           o_res, T, g_tro, o_knee, o_argmin, r, verdict):
-    import os
-
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -264,7 +311,8 @@ def _plot(args, name, dev, K, N, NT, Ms, gemm_nspr, op_nspr, g_a, g_b, o_a, o_b,
     ax3.axhline(0, color="gray", lw=0.5)
     tile_lines(ax3)
     ax3.set_ylabel("op per-row - trend (ns)")
-    ax3.set_title(f"op detrended ripple; correlation with GEMM ripple r={r:.2f}",
+    rs = "n/a" if r is None else f"{r:.2f}"
+    ax3.set_title(f"op detrended ripple; correlation with GEMM ripple r={rs}",
                   fontsize=10)
 
     tag = name.replace(" ", "_").replace("(", "").replace(")", "")
