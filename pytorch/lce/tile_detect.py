@@ -263,28 +263,36 @@ def main():
         json.dump(record, f, indent=2)
     print(f"wrote {rpath}")
 
+    plot_record(record, args.out_dir)
+
+
+def plot_record(rec, out_dir):
+    """Render the 3-panel figure from a saved record (live run or any collected
+    JSON) -- the raw sweep is stored, so figures regenerate without hardware."""
+    Ms, gemm_nspr, op_nspr = rec["Ms"], rec["gemm_nspr"], rec["op_nspr"]
     o_a, o_b, o_res = _fit_trend(Ms, op_nspr)
     g_tro = _troughs(Ms, gemm_nspr)
-    _plot(args, name, dev, K, N, NT, Ms, gemm_nspr, op_nspr, o_a, o_b, o_res,
-          d["gemm_tile_T"], g_tro, d["op_knee"], d["op_argmin"],
-          d["ripple_corr_r"], d["verdict"])
+    _plot(rec["device_name"], rec["device_type"], rec["dtype"], rec["K"], rec["N"],
+          rec["NT"], rec["m_max"], out_dir, Ms, gemm_nspr, op_nspr, o_a, o_b, o_res,
+          rec["gemm_tile_T"], g_tro, rec["op_knee"], rec["op_argmin"],
+          rec["ripple_corr_r"], rec["verdict"])
 
 
-def _plot(args, name, dev, K, N, NT, Ms, gemm_nspr, op_nspr, o_a, o_b,
-          o_res, T, g_tro, o_knee, o_argmin, r, verdict):
+def _plot(name, dev, dtype, K, N, NT, m_max, out_dir, Ms, gemm_nspr, op_nspr,
+          o_a, o_b, o_res, T, g_tro, o_knee, o_argmin, r, verdict):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     M = np.array(Ms, float)
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(11, 11), sharex=True)
-    fig.suptitle(f"{name} ({dev}) | {args.dtype} | K={K} N={N} NT={NT}\n{verdict}",
+    fig.suptitle(f"{name} ({dev}) | {dtype} | K={K} N={N} NT={NT}\n{verdict}",
                  fontsize=11)
     ax3.set_xlabel("M = chunk size")
 
     def tile_lines(ax):
         if T:
-            for m in range(T, args.m_max + 1, T):
+            for m in range(T, m_max + 1, T):
                 ax.axvline(m, color="gray", lw=0.5, ls=":", alpha=0.5)
 
     ax1.plot(Ms, gemm_nspr, marker=".", color="C0")
@@ -316,7 +324,7 @@ def _plot(args, name, dev, K, N, NT, Ms, gemm_nspr, op_nspr, o_a, o_b,
                   fontsize=10)
 
     tag = name.replace(" ", "_").replace("(", "").replace(")", "")
-    path = os.path.join(args.out_dir, f"tile_detect_{tag}_{dev}_{args.dtype}.png")
+    path = os.path.join(out_dir, f"tile_detect_{tag}_{dev}_{dtype}_K{K}_N{N}_NT{NT}.png")
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     print(f"wrote {path}")

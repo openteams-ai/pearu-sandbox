@@ -25,6 +25,9 @@ def main():
     p.add_argument("--rederive", action="store_true",
                    help="recompute derived metrics from each record's raw sweep "
                         "(via tile_detect.analyze) and rewrite it in place")
+    p.add_argument("--plot", action="store_true",
+                   help="render the 3-panel figure for each record from its raw "
+                        "sweep into --data-dir (regenerable without hardware)")
     args = p.parse_args()
 
     paths = sorted(glob.glob(os.path.join(args.data_dir, "*.json")))
@@ -45,6 +48,12 @@ def main():
             with open(path, "w") as f:
                 json.dump(r, f, indent=2)
         print(f"re-derived {len(recs)} record(s) from raw\n")
+
+    if args.plot:
+        from tile_detect import plot_record
+        for r in recs:
+            plot_record(r, args.data_dir)
+        print()
 
     def cc(r):
         c = r.get("compute_capability")
