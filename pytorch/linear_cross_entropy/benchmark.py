@@ -194,10 +194,9 @@ def configs(default_force=False):
             #*((modules.NewLinearCrossEntropyLoss, dict(force=not True, options=torch.nn.functional.LinearCrossEntropyOptions(grad_inplace=True, batch_chunk_size=1024 * k ))) for k in [1, 2, 4]),
             *((modules.NewLinearCrossEntropyLoss, dict(
                 force=not True,
-                options=torch.nn.functional.LinearCrossEntropyOptions(
-                grad_inplace=True, chunking_method=f"liger:{factor}", acc_dtype=torch.float32, acc_policy=a
-            ))) for a in ["AATAA", "TATAA", "AAAAA", "TTTTT", "TTTAA", "TTTTA", "TTTTAT", "TTTTTA",
-                          "TTTAAA", "TTTATA"][-3:-2] for factor in [0, -1]),
+                options=torch.nn.LinearCrossEntropyOptions(
+                acc_dtype=torch.float32, acc_policy=a
+            ))) for a in ["auto", "accurate", "compact"][1:2]),
             # (modules.NewLinearCrossEntropyLoss, dict(force=not True, options=dict(max_memory_gb=1))),
             # (modules.NewLinearCrossEntropyLoss,dict(force=not True, options=dict(max_memory_gb=1.5, grad_inplace=True))),
             # (modules.NewLinearCrossEntropyLoss, dict(force=not True, options=dict(max_memory_gb=1, grad_inplace=True, features_chunk_size=8192))),
@@ -233,7 +232,7 @@ def configs(default_force=False):
                     params_ = extra_kwargs.get(
                         "options", extra_kwargs.get("params", dict())
                     )
-                    if isinstance(params_, torch.nn.functional.LinearCrossEntropyOptions):
+                    if isinstance(params_, torch.nn.LinearCrossEntropyOptions):
                         import dataclasses
                         params_ = dataclasses.asdict(params_)
                     skip_keys.append("options")
@@ -406,7 +405,7 @@ def measure(queue, cls, args, kwargs, num_tokens, token_dtype):
 
         ref_kwargs = kwargs.copy()
         ref_kwargs['dtype'] = ref_dtype
-        ref_kwargs['options'] = torch.nn.functional.LinearCrossEntropyOptions(grad_inplace=True, chunking_method="liger")
+        ref_kwargs['options'] = torch.nn.LinearCrossEntropyOptions()
         #ref_kwargs['options'] = None
         ref_module = nn.LinearCrossEntropyLoss(*args, **ref_kwargs)
         if isinstance(module, modules.NewLinearCrossEntropyLoss):

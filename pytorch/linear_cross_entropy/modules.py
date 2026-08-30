@@ -1212,7 +1212,7 @@ class NewLinearCrossEntropyLoss(torch.nn.LinearCrossEntropyLoss):
 
     @staticmethod
     def samples(device=None, dtype=None):
-        for options in [torch.nn.functional.LinearCrossEntropyOptions(grad_inplace=True), None]:
+        for options in [torch.nn.LinearCrossEntropyOptions(), None]:
             for (
                     module_args,
                     module_kwargs,
