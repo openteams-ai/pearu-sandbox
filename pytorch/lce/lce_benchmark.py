@@ -228,6 +228,20 @@ def _build_configs(dtype: str, include_acc_none: bool = False) -> list[Config]:
 # Reference path (full materialization)
 # ---------------------------------------------------------------------------
 
+def _native_override_ran(call) -> bool:
+    """Whether `call` dispatched a `_native` override of a linear_cross_entropy
+    op. The registry's router dispatches below TorchDispatchMode, so a dispatch
+    mode sees nothing and the profiler is what can observe this."""
+    from torch.profiler import ProfilerActivity, profile
+
+    with profile(activities=[ProfilerActivity.CPU]) as prof:
+        call()
+    return any(
+        e.key.startswith("_native::") and "linear_cross_entropy" in e.key
+        for e in prof.key_averages()
+    )
+
+
 def _reference_forward_backward(input, linear_weight, target, reduction, linear_bias=None):
     logits = F.linear(input, linear_weight, linear_bias)
     loss = F.cross_entropy(logits, target, reduction=reduction)
@@ -267,6 +281,7 @@ def _measure_in_subprocess(
     prob_target: bool,
     bias: bool,
     config: Config,
+    native_stage: str,
     allow_retain_graph: bool,
     warmup: int,
     iters: int,
@@ -287,6 +302,7 @@ def _measure_in_subprocess(
         "chunking_method": config.chunking_method,
         "use_chunked": config.use_chunked,
         "acc_dtype": config.acc_dtype,
+        "native_stage": native_stage,
         "allow_retain_graph": allow_retain_graph,
         "warmup": warmup,
         "iters": iters,
@@ -294,10 +310,15 @@ def _measure_in_subprocess(
         "seed": seed,
     }
 
+    # The overrides register at import time, so the level is selected through
+    # the child's environment rather than from inside the child.
+    env = dict(os.environ)
+    env["TORCH_DISABLE_NATIVE_JIT"] = "1" if native_stage == "off" else "0"
     proc = subprocess.run(
         [sys.executable, __file__, "--worker", json.dumps(payload)],
         capture_output=True,
         text=True,
+        env=env,
     )
 
     # Identifier fields that pin this row to its point even on subprocess crash.
@@ -306,6 +327,7 @@ def _measure_in_subprocess(
         "acc_policy": config.acc_policy,
         "chunking_method": config.chunking_method,
         "acc_dtype": config.acc_dtype,
+        "native_stage": native_stage,
         "num_tokens": num_tokens,
         "in_features": in_features,
         "num_classes": num_classes,
@@ -323,7 +345,15 @@ def _measure_in_subprocess(
         }
     try:
         parsed = json.loads(proc.stdout.strip().splitlines()[-1])
-        return {**ident, **parsed}
+        row = {**ident, **parsed}
+        observed = row.get("native_observed")
+        if config.use_chunked and observed is not None:
+            if observed != (native_stage != "off"):
+                row["error"] = (
+                    f"native_stage={native_stage!r} requested but the override"
+                    f" {'did not run' if native_stage != 'off' else 'ran'}"
+                )
+        return row
     except Exception as e:
         return {**ident, "error": f"parse failed: {e!r}\nstdout: {proc.stdout}"}
 
@@ -406,6 +436,10 @@ def _worker_main(payload: dict) -> None:
         call = lambda: _reference_forward_backward(
             input, linear_weight, target, reduction, linear_bias
         )
+
+    # Untimed, and before warmup, so the observation costs nothing measured.
+    _clear_grads()
+    native_observed = _native_override_ran(call)
 
     # Warmup
     for _ in range(payload["warmup"]):
@@ -576,6 +610,8 @@ def _worker_main(payload: dict) -> None:
         "prob_target": prob_target,
         "bias": bias,
         "allow_retain_graph": payload["allow_retain_graph"],
+        "native_stage": payload["native_stage"],
+        "native_observed": native_observed,
     }
     result.update(_env_info(device_type))
     if timing_error is not None:
@@ -612,6 +648,14 @@ def _parse_args():
         "check.",
     )
     p.add_argument("--allow-retain-graph", action="store_true")
+    p.add_argument(
+        "--native-stages",
+        nargs="+",
+        default=["off"],
+        help="torch._native override levels to measure for the chunked configs: "
+        "'off' runs with TORCH_DISABLE_NATIVE_JIT=1 (the aten baseline), any "
+        "other name enables the overrides and labels the rows with that stage.",
+    )
     p.add_argument(
         "--include-acc-none",
         action="store_true",
@@ -657,24 +701,29 @@ def main() -> int:
         if has_liger:
             configs.append(Config("liger", None, None, use_chunked=False))
         for cfg in configs:
-            row = _measure_in_subprocess(
-                num_tokens=args.num_tokens,
-                in_features=args.in_features,
-                num_classes=args.num_classes,
-                dtype=dtype,
-                device_type=device_type,
-                reduction=args.reduction,
-                prob_target=args.prob_target,
-                bias=args.bias,
-                config=cfg,
-                allow_retain_graph=args.allow_retain_graph,
-                warmup=args.warmup,
-                iters=args.iters,
-                grad_error_check=not args.no_grad_error_check,
-                seed=args.seed,
-            )
-            rows.append(row)
-            print(json.dumps(row))
+            # Only the chunked path routes through an override, so the
+            # reference and liger curves are measured once.
+            stages = args.native_stages if cfg.use_chunked else ["off"]
+            for native_stage in stages:
+                row = _measure_in_subprocess(
+                    num_tokens=args.num_tokens,
+                    in_features=args.in_features,
+                    num_classes=args.num_classes,
+                    dtype=dtype,
+                    device_type=device_type,
+                    reduction=args.reduction,
+                    prob_target=args.prob_target,
+                    bias=args.bias,
+                    config=cfg,
+                    native_stage=native_stage,
+                    allow_retain_graph=args.allow_retain_graph,
+                    warmup=args.warmup,
+                    iters=args.iters,
+                    grad_error_check=not args.no_grad_error_check,
+                    seed=args.seed,
+                )
+                rows.append(row)
+                print(json.dumps(row))
 
     if args.out is not None:
         if not rows:
@@ -684,6 +733,8 @@ def main() -> int:
         # extrasaction='ignore'.
         keys = [
             "label",
+            "native_stage",
+            "native_observed",
             "acc_policy",
             "chunking_method",
             "acc_dtype",
