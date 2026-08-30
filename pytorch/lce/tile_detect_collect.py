@@ -84,10 +84,10 @@ def main():
         rrange = f"[{min(rs):.2f}, {max(rs):.2f}]" if rs else "n/a"
         print(f"\nGPU runs: {len(gpu)} | op-tracks-tile {tracks}/{len(gpu)} | "
               f"r in {rrange}")
-        reg = [r for r in gpu if r.get("gemm_tile_regular")]
-        if reg:
-            print("  regular-sawtooth tiles (cc, shape -> tile, mis-align penalty):")
-            for r in sorted(reg, key=lambda r: (cc(r), r["N"], r["K"])):
+        tracked = [r for r in gpu if r["op_tracks_gemm_tile"]]
+        if tracked:
+            print("  tracked tiles (cc, shape -> tile, mis-align penalty):")
+            for r in sorted(tracked, key=lambda r: (cc(r), r["N"], r["K"])):
                 print(f"    cc{cc(r):<4} N={r['N']:<7} K={r['K']:<5} -> tile "
                       f"{r['gemm_tile_T']:<4} ~{fmt(r.get('ripple_penalty_pct'))}% penalty")
 

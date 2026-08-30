@@ -120,14 +120,19 @@ def analyze(Ms, gemm_nspr, op_nspr, m_step, m_max):
     o_knee = next(Ms[i] for i in range(len(op_nspr)) if op_nspr[i] <= 1.10 * min(op_nspr))
     o_argmin = Ms[int(np.argmin(op_nspr))]
 
+    # A tile is only "tracked" if the GEMM has a regular sawtooth AND the op's
+    # differenced ripple co-moves with it -- no tile, nothing to track.
+    tracks = gemm_regular and not np.isnan(r) and r > 0.3
+
     # Practical mis-alignment penalty: fold the op ripple over the tile period in
     # the useful (large-M) tail and take the peak-to-peak of the phase-binned
     # means, as % of the per-row floor. Drift cancels within each phase bin (each
     # bin spans all periods), so this isolates the sawtooth amplitude -- the cost
-    # of landing off a tile multiple at a useful chunk size. This is the decision
-    # axis: a regular tile with ~0% penalty (e.g. Blackwell) is not worth aligning.
+    # of landing off a tile multiple at a useful chunk size. Only meaningful when
+    # the op actually tracks the tile: on a flat curve, folding over the period
+    # just measures the residual drift (a fake penalty), so gate on ``tracks``.
     ripple_penalty_pct = None
-    if T and gemm_regular:  # folding over a bogus period would be meaningless
+    if tracks:
         half = len(Ms) // 2
         tailM, tail_res = M[half:], o_res[half:]
         floor = float(np.median(np.array(op_nspr)[half:]))
@@ -140,9 +145,6 @@ def analyze(Ms, gemm_nspr, op_nspr, m_step, m_max):
         if len(means) >= 2 and floor > 0:
             ripple_penalty_pct = round((max(means) - min(means)) / floor * 100, 1)
 
-    # A tile is only "tracked" if the GEMM has a regular sawtooth AND the op's
-    # differenced ripple co-moves with it -- no tile, nothing to track.
-    tracks = gemm_regular and not np.isnan(r) and r > 0.3
     rs = "nan" if np.isnan(r) else f"{r:.2f}"
     if tracks:
         pen = "" if ripple_penalty_pct is None else f", ~{ripple_penalty_pct}% mis-align penalty"

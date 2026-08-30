@@ -375,7 +375,7 @@
     928,
     960
   ],
-  "gemm_ripple_ns": 153.79614896061344,
+  "gemm_ripple_ns": 153.79614896061207,
   "op_knee": 640,
   "op_argmin": 1024,
   "op_ripple_period": 128,
