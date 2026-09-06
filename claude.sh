@@ -25,6 +25,8 @@
 #   cd /path/to/some/project
 #   conda activate myenv     # optional; the active env is forwarded
 #   claude                   # launches sandboxed claude with CWD writable
+#   claude update            # self-update; runs the native updater on the
+#                            # host, unsandboxed (see UPDATING CLAUDE CODE)
 #
 # ============================================================================
 # SANDBOX LAYOUT (what claude sees)
@@ -95,6 +97,30 @@
 # ~/.kube, ~/.docker, ~/.password-store) are refused both as CWD and as
 # CLAUDE_SANDBOX_RW targets. Paths that resolve to "/" or "$HOME" are
 # refused outright.
+#
+# ============================================================================
+# UPDATING CLAUDE CODE
+# ============================================================================
+#
+# `claude update` (alias `upgrade`) and `claude install [target]` are
+# intercepted by this wrapper and run with the newest installed binary
+# directly on the host, NOT inside the sandbox. Inside the sandbox they
+# cannot work: the proxy allowlist blocks downloads.claude.ai, the versions
+# directory is not bound, and DISABLE_AUTOUPDATER=1 is set (so a sandboxed
+# session never tries to self-update on its own either).
+#
+# The native updater installs the new release under
+# $HOME/.local/share/claude/versions/<version>. This wrapper always runs the
+# highest version found there, so the update takes effect on the next
+# launch. As of Claude Code 2.1.263 the updater refuses to overwrite a
+# launcher at $HOME/.local/bin/claude that is not its own versions/ symlink
+# (it logs "Not replacing ..." and still reports success), so the wrapper
+# stays on PATH. Should an installer re-point the launcher anyway, the
+# wrapper restores it right after the subcommand finishes.
+#
+# Because the launcher is not installer-managed, Claude Code skips its
+# automatic cleanup of old versions (~215 MB each). Prune by hand:
+#   ls ~/.local/share/claude/versions/     # then rm the ones you don't need
 #
 # ============================================================================
 # ENVIRONMENT-SPECIFIC SETUP NOTES
@@ -280,6 +306,8 @@
 #   - $CWD (and .git, .env, etc. inside it) is read-write to claude.
 #   - bwrap relies on unprivileged user namespaces. There is no seccomp
 #     filter or resource cap configured here.
+#   - `claude update|upgrade|install` run the native binary on the host,
+#     unsandboxed, with your full environment (see UPDATING CLAUDE CODE).
 
 claude() (
   set -euo pipefail
@@ -306,6 +334,30 @@ claude() (
     done
   fi
   [[ -n "$claude_bin" ]] || { echo "claude.sh: no executable found for version '$latest'" >&2; return 1; }
+
+  # ---- host-side subcommands: update / upgrade / install ----
+  # See "UPDATING CLAUDE CODE" in the header. These run the newest installed
+  # binary directly on the host with the caller's environment; the sandbox
+  # would block the download and has no writable versions directory. After
+  # the subcommand, restore $HOME/.local/bin/claude if the installer moved
+  # it off this script.
+  case "${1:-}" in
+    update|upgrade|install)
+      local launcher="$HOME/.local/bin/claude" self before after rc=0
+      self="$(readlink -f -- "${BASH_SOURCE[0]}")"
+      before="$(readlink -f -- "$launcher" 2>/dev/null || true)"
+      echo "claude.sh: running '$latest $*' on the host (unsandboxed)" >&2
+      "$claude_bin" "$@" || rc=$?
+      after="$(readlink -f -- "$launcher" 2>/dev/null || true)"
+      if [[ "$before" == "$self" && "$after" != "$self" ]]; then
+        ln -sfn -- "$self" "$launcher"
+        echo "claude.sh: installer re-pointed $launcher -> $after; restored -> $self" >&2
+      fi
+      echo "claude.sh: installed versions: $(find "$versions_dir" -mindepth 1 -maxdepth 1 \
+              \( -type f -o -type d -o -type l \) -printf '%f\n' 2>/dev/null | sort -V | tr '\n' ' ')" >&2
+      return "$rc"
+      ;;
+  esac
 
   cwd="$(pwd -P)"
   mkdir -p "$HOME/.claude"
@@ -423,6 +475,12 @@ claude() (
     --setenv USER "${USER:-$(id -un)}"
     --setenv PATH "$PATH"
     --setenv TERM "${TERM:-xterm-256color}"
+    # Never let the sandboxed claude try to self-update. Downloads are
+    # blocked by the proxy allowlist and the versions directory is not
+    # bound, so the attempt could only fail; `claude update` (run on the
+    # host by this wrapper) is the supported path. Note: the legacy
+    # `autoUpdates: false` in ~/.claude.json is ignored for native installs.
+    --setenv DISABLE_AUTOUPDATER 1
   )
   # Variables that are safe-to-forward IF set in the caller's environment.
   # Locale + display niceties, Anthropic config, and standard proxy vars.
