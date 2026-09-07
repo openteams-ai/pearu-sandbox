@@ -379,6 +379,27 @@ claude() (
       return 1 ;;
   esac
 
+  # ----- git identity hint -----
+  # ~/.gitconfig is not bound into the sandbox, so a *global* git identity is
+  # invisible inside it and commits fail with "Author identity unknown". The
+  # supported fix is a repo-local identity: .git/config travels with the repo
+  # (bound read-write as CWD), so a [user] section there is enough on its own
+  # -- git reads local before global and needs nothing else. If this repo has
+  # none, say so. Setting it must happen from a HOST shell to copy the values
+  # out of ~/.gitconfig, which is not visible in here either.
+  if command -v git >/dev/null \
+     && git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [[ -z "$(git -C "$cwd" config --local user.name  2>/dev/null)" \
+       || -z "$(git -C "$cwd" config --local user.email 2>/dev/null)" ]]; then
+      local _gitroot
+      _gitroot="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || echo "$cwd")"
+      echo "claude.sh: no repo-local git identity; commits inside the sandbox will fail" >&2
+      echo "           (~/.gitconfig is not bound in). Set it once, from a HOST shell:" >&2
+      echo "             git -C \"$_gitroot\" config user.name  \"\$(git config --global user.name)\"" >&2
+      echo "             git -C \"$_gitroot\" config user.email \"\$(git config --global user.email)\"" >&2
+    fi
+  fi
+
   # When CWD is $HOME we deliberately do *not* bind it: that would expose
   # the entire home directory. Only the explicit bindings below apply.
   bind_cwd=1
