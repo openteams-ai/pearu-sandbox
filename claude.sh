@@ -27,6 +27,9 @@
 #   claude                   # launches sandboxed claude with CWD writable
 #   claude update            # self-update; runs the native updater on the
 #                            # host, unsandboxed (see UPDATING CLAUDE CODE)
+#   claude --ssh github.com  # + git push / ssh to github.com through a
+#                            # per-session ssh-agent; the private key never
+#                            # enters the sandbox (see SSH ACCESS)
 #
 # ============================================================================
 # SANDBOX LAYOUT (what claude sees)
@@ -121,6 +124,70 @@
 # Because the launcher is not installer-managed, Claude Code skips its
 # automatic cleanup of old versions (~215 MB each). Prune by hand:
 #   ls ~/.local/share/claude/versions/     # then rm the ones you don't need
+#
+# ============================================================================
+# SSH ACCESS (git push, remote hosts)
+# ============================================================================
+#
+# By default a session has NO SSH credentials: nothing under ~/.ssh is bound
+# and no agent socket is forwarded, so it cannot push, cannot ssh anywhere,
+# and cannot post to a remote. That is the "locked" tier and needs no flag.
+#
+# Flags (claude.sh's own; they must come BEFORE claude's arguments and are
+# stripped before claude sees the command line):
+#
+#   --ssh HOST            allow SSH to HOST. Repeatable. HOST is anything ssh
+#                         accepts: a hostname, user@host, or an alias from
+#                         ~/.ssh/config (HostName/User/Port/IdentityFile are
+#                         honoured -- resolution is done on the host with
+#                         `ssh -G`).
+#   --ssh-unrestricted    allow SSH anywhere the key is accepted. Mutually
+#                         exclusive with --ssh HOST. The escape hatch.
+#   --ssh-key PATH        private key to use. Default: the first readable
+#                         IdentityFile ssh itself would try for that host
+#                         (config-aware, FIDO *_sk keys skipped).
+#   --ssh-timeout LIFE    expire the loaded key after LIFE (seconds, or
+#                         e.g. 30m, 2h). Off unless given.
+#
+# How it works: claude.sh starts a FRESH ssh-agent for this session only,
+# loads the key into it, binds just that agent's unix socket into the
+# sandbox and exports SSH_AUTH_SOCK. ssh/git inside ask the host agent to
+# sign; the private key itself is never visible in the sandbox. When the
+# session ends the agent is killed and its socket removed. An agent orphaned
+# by an uncatchable kill (SIGKILL of the wrapper) is reaped by the next --ssh
+# launch's janitor, which skips still-running sessions, so it is safe with
+# concurrent sessions. Session state lives under
+# ${XDG_RUNTIME_DIR:-/tmp}/claude-sandbox-ssh.<uid>/.
+#
+# Per-host enforcement: with --ssh HOST the key is loaded with an OpenSSH
+# destination constraint (ssh-add -h, OpenSSH >= 8.9). The AGENT then
+# refuses to sign for any other host -- verified: for a non-permitted host
+# the key is not even offered. This matters because SSH is a raw socket and
+# shares the host network namespace in "proxy" mode, so the mitmproxy
+# allowlist cannot see or filter it; the constraint is the control.
+#
+# User pinning: the constraint carries a user only when you asked for one,
+# i.e. you wrote user@host, or ~/.ssh/config sets User for that alias. So
+# `--ssh github.com` permits any user (git@ included); `--ssh git@github.com`
+# permits only git@. Non-22 ports are handled ([host]:port, as known_hosts
+# stores them).
+#
+# Requirements and limits:
+#   - The host's key must already be in ~/.ssh/known_hosts on the host
+#     (agent constraints are keyed by host key). If it is not, claude.sh
+#     refuses with a hint; connect once from a host shell (`ssh HOST`).
+#     This is deliberate: no trust-on-first-use is done for you.
+#   - ~/.ssh/known_hosts and ~/.ssh/config are bound READ-ONLY into the
+#     sandbox (public data). Nothing else under ~/.ssh is. `Include` files
+#     referenced from config are not bound; keep aliases in the main file.
+#   - An encrypted key prompts for its passphrase once, on the host tty, at
+#     launch. No askpass/DISPLAY is needed. A non-tty launch cannot prompt.
+#   - Constraints are host-level, not operation-level: within a permitted
+#     host the SSH tunnel is opaque, so e.g. a force-push cannot be blocked.
+#   - --ssh-unrestricted loads the key with no constraint: a compromised
+#     session can then authenticate as you to any host that trusts the key
+#     for as long as the session lives (mitigate with --ssh-timeout).
+#   - Git identity is separate: see the repo-local [user] hint at launch.
 #
 # ============================================================================
 # ENVIRONMENT-SPECIFIC SETUP NOTES
@@ -287,6 +354,18 @@
 #       You ran claude from a known-secret directory (~/.ssh etc.). cd
 #       somewhere else.
 #
+#   "claude.sh: no trusted host key for '<host>' ..." (with --ssh)
+#       The host is not in ~/.ssh/known_hosts on the host side. Connect once
+#       from a HOST shell (`ssh <host>`) to record it, then relaunch.
+#
+#   "Host key verification failed" inside the sandbox
+#       Same cause: known_hosts is bound read-only, so unknown hosts cannot
+#       be added from inside. Trust the host from a host shell first.
+#
+#   "Permission denied (publickey)" to host B while running with --ssh A
+#       Working as designed: the agent only signs for hosts named in --ssh.
+#       Add `--ssh B` (or use --ssh-unrestricted).
+#
 # ============================================================================
 # SECURITY CAVEATS
 # ============================================================================
@@ -308,9 +387,51 @@
 #     filter or resource cap configured here.
 #   - `claude update|upgrade|install` run the native binary on the host,
 #     unsandboxed, with your full environment (see UPDATING CLAUDE CODE).
+#   - --ssh HOST / --ssh-unrestricted forward a per-session ssh-agent socket.
+#     The key stays on the host, but while the session lives the sandbox can
+#     authenticate to the permitted host(s) as you (any host, if
+#     unrestricted). SSH egress is not filtered by the proxy allowlist.
 
 claude() (
   set -euo pipefail
+
+  # ---- claude.sh's own flags (must precede claude's arguments) ----
+  # See "SSH ACCESS" in the header. Parsing stops at the first token that is
+  # not one of ours; everything from there on is passed to claude untouched.
+  local -a _ssh_hosts=()
+  local _ssh_unrestricted=0 _ssh_key="" _ssh_timeout="" _ssh_want=0
+  while (( $# > 0 )); do
+    case "$1" in
+      --ssh)
+        [[ $# -ge 2 && -n "$2" && "$2" != -* ]] \
+          || { echo "claude.sh: --ssh needs a host (hostname, user@host, or ~/.ssh/config alias)" >&2; return 2; }
+        _ssh_hosts+=( "$2" ); shift 2 ;;
+      --ssh=?*)           _ssh_hosts+=( "${1#--ssh=}" ); shift ;;
+      --ssh-unrestricted) _ssh_unrestricted=1; shift ;;
+      --ssh-key)
+        [[ $# -ge 2 && -n "$2" ]] || { echo "claude.sh: --ssh-key needs a path" >&2; return 2; }
+        _ssh_key="$2"; shift 2 ;;
+      --ssh-key=?*)       _ssh_key="${1#--ssh-key=}"; shift ;;
+      --ssh-timeout)
+        [[ $# -ge 2 && -n "$2" ]] || { echo "claude.sh: --ssh-timeout needs a lifetime (seconds, or e.g. 30m)" >&2; return 2; }
+        _ssh_timeout="$2"; shift 2 ;;
+      --ssh-timeout=?*)   _ssh_timeout="${1#--ssh-timeout=}"; shift ;;
+      *) break ;;
+    esac
+  done
+  (( ${#_ssh_hosts[@]} > 0 || _ssh_unrestricted )) && _ssh_want=1
+  if (( _ssh_unrestricted && ${#_ssh_hosts[@]} > 0 )); then
+    echo "claude.sh: --ssh-unrestricted and --ssh HOST are mutually exclusive" >&2; return 2
+  fi
+  if (( ! _ssh_want )) && [[ -n "$_ssh_key$_ssh_timeout" ]]; then
+    echo "claude.sh: --ssh-key / --ssh-timeout need --ssh HOST or --ssh-unrestricted" >&2; return 2
+  fi
+  if [[ -n "$_ssh_timeout" && ! "$_ssh_timeout" =~ ^[0-9]+[smhdwSMHDW]?$ ]]; then
+    echo "claude.sh: --ssh-timeout: bad lifetime '$_ssh_timeout' (seconds, or e.g. 30m, 2h)" >&2; return 2
+  fi
+  if [[ -n "$_ssh_key" && ! -r "$_ssh_key" ]]; then
+    echo "claude.sh: --ssh-key: cannot read '$_ssh_key'" >&2; return 2
+  fi
 
   versions_dir="${HOME}/.local/share/claude/versions"
   [[ -d "$versions_dir" ]] || { echo "claude.sh: missing $versions_dir" >&2; return 1; }
@@ -343,6 +464,7 @@ claude() (
   # it off this script.
   case "${1:-}" in
     update|upgrade|install)
+      (( _ssh_want )) && echo "claude.sh: --ssh* flags are ignored for '$1'" >&2
       local launcher="$HOME/.local/bin/claude" self before after rc=0
       self="$(readlink -f -- "${BASH_SOURCE[0]}")"
       before="$(readlink -f -- "$launcher" 2>/dev/null || true)"
@@ -610,6 +732,161 @@ claude() (
   # blocks writes to $HOME proper — not to anything we intentionally exposed.
   # Must come AFTER every bind whose target is under $HOME, since bwrap may
   # need to create intermediate directories on the tmpfs.
+  # ----- SSH access: per-session agent with destination constraints -----
+  # See "SSH ACCESS" in the header. Runs on the HOST, before the sandbox
+  # exists: resolves each --ssh spec through ~/.ssh/config, checks the host
+  # key is already trusted, starts a fresh agent, loads the key(s) with
+  # destination constraints, and binds only the agent socket (plus the
+  # public known_hosts/config files) into the sandbox.
+  _ssh_agent_pid="" _ssh_dir=""
+  _claude_ssh_cleanup() {
+    # Kill only if the recorded PID is still an ssh-agent -- guards against a
+    # PID that was already reaped and recycled to an unrelated process.
+    if [[ -n "${_ssh_agent_pid:-}" \
+       && "$(cat "/proc/${_ssh_agent_pid}/comm" 2>/dev/null)" == ssh-agent ]]; then
+      kill "$_ssh_agent_pid" 2>/dev/null
+    fi
+    [[ -n "${_ssh_dir:-}" ]] && rm -rf -- "$_ssh_dir"
+    _ssh_agent_pid="" _ssh_dir=""
+    return 0
+  }
+  _claude_ssh_pick_key() {
+    # $1 = `ssh -G` output. Print the first readable IdentityFile ssh itself
+    # would try (config-aware). FIDO *_sk keys need a provider; skip them.
+    local cand
+    while read -r cand; do
+      cand="${cand/#\~/$HOME}"
+      [[ "$cand" == *_sk ]] && continue
+      [[ -r "$cand" ]] && { printf '%s\n' "$cand"; return 0; }
+    done < <(awk '$1=="identityfile"{print $2}' <<<"$1")
+    return 1
+  }
+  _claude_ssh_sweep() {
+    # Janitor for orphans left by an uncatchable kill (SIGKILL of the wrapper
+    # runs no trap). A session dir is orphaned iff its owner process is gone:
+    # we compare the recorded PID *and* its start-time, so a recycled PID (same
+    # number, newer start-time) is never mistaken for the live owner. Live
+    # sessions are always skipped, so this is safe to run with any number of
+    # concurrent claude.sh sessions on the host.
+    local base="$1" d opid ostart now agent
+    local _ng=0; shopt -q nullglob && _ng=1; shopt -s nullglob
+    for d in "$base"/session.*; do
+      [[ -d "$d" ]] || continue
+      [[ -r "$d/owner.id" ]] || continue          # unstamped => mid-setup; leave it
+      read -r opid ostart < "$d/owner.id" 2>/dev/null || continue
+      if [[ -n "$opid" && -r "/proc/$opid/stat" ]]; then
+        now="$(awk '{print $22}' "/proc/$opid/stat" 2>/dev/null || true)"
+        [[ -n "$now" && "$now" == "$ostart" ]] && continue   # owner alive -> skip
+      fi
+      # Orphan: drop keys via the socket first (addresses the agent by socket,
+      # immune to PID reuse), then guard-kill the recorded agent, then remove.
+      [[ -S "$d/agent.sock" ]] && SSH_AUTH_SOCK="$d/agent.sock" ssh-add -D >/dev/null 2>&1 || true
+      if [[ -r "$d/agent.pid" ]] && read -r agent < "$d/agent.pid" 2>/dev/null \
+         && [[ -n "$agent" && "$(cat "/proc/$agent/comm" 2>/dev/null)" == ssh-agent ]]; then
+        kill "$agent" 2>/dev/null || true
+      fi
+      rm -rf -- "$d" 2>/dev/null || true
+    done
+    (( _ng )) || shopt -u nullglob
+    return 0
+  }
+  _claude_ssh_setup() {
+    local kh="$HOME/.ssh/known_hosts" cfg="$HOME/.ssh/config"
+    command -v ssh-agent >/dev/null && command -v ssh-add >/dev/null && command -v ssh-keygen >/dev/null \
+      || { echo "claude.sh: ssh-agent/ssh-add/ssh-keygen not found (install openssh-client)" >&2; return 1; }
+    [[ -r "$kh" ]] || { echo "claude.sh: $kh not readable; --ssh needs pre-trusted host keys there" >&2; return 1; }
+
+    declare -A _by_key=()          # key file -> space-separated constraints
+    local spec g host user port khname key localuser
+    localuser="$(id -un)"
+    for spec in "${_ssh_hosts[@]}"; do
+      [[ "$spec" != -* ]] || { echo "claude.sh: bad --ssh host '$spec'" >&2; return 1; }
+      g="$(ssh -G "$spec" 2>/dev/null)" || { echo "claude.sh: cannot resolve '$spec' (ssh -G failed)" >&2; return 1; }
+      host="$(awk '$1=="hostname"{print $2; exit}' <<<"$g")"
+      user="$(awk '$1=="user"    {print $2; exit}' <<<"$g")"
+      port="$(awk '$1=="port"    {print $2; exit}' <<<"$g")"
+      # Pin the user only when asked for: user@ in the spec, or set by config.
+      [[ "$spec" != *@* && "$user" == "$localuser" ]] && user=""
+      khname="$host"; [[ "$port" != 22 ]] && khname="[$host]:$port"
+      if ! ssh-keygen -F "$khname" -f "$kh" >/dev/null 2>&1; then
+        echo "claude.sh: no trusted host key for '$khname' (--ssh $spec) in $kh." >&2
+        echo "           Connect once from a HOST shell to record it:   ssh $spec" >&2
+        return 1
+      fi
+      key="$_ssh_key"
+      [[ -n "$key" ]] || key="$(_claude_ssh_pick_key "$g")" \
+        || { echo "claude.sh: no readable private key for '$spec'; pass --ssh-key PATH" >&2; return 1; }
+      _by_key[$key]+=" ${user:+$user@}$khname"
+    done
+    if (( _ssh_unrestricted )); then
+      key="$_ssh_key"
+      [[ -n "$key" ]] || key="$(_claude_ssh_pick_key "$(ssh -G claude-sandbox.invalid 2>/dev/null)")" \
+        || { echo "claude.sh: no readable private key found under ~/.ssh; pass --ssh-key PATH" >&2; return 1; }
+      _by_key[$key]=""
+    fi
+
+    # Per-user base dir, pinned (not $TMPDIR) so the janitor finds siblings
+    # deterministically. Sweep prior orphans before adding this session.
+    local base="${XDG_RUNTIME_DIR:-/tmp}/claude-sandbox-ssh.$(id -u)"
+    mkdir -p "$base" 2>/dev/null && chmod 700 "$base" \
+      || { echo "claude.sh: cannot create session base $base" >&2; return 1; }
+    _claude_ssh_sweep "$base" || true
+
+    # A fresh agent for this session only. Its socket is the one secret-
+    # bearing thing bound in; the key files themselves never are.
+    _ssh_dir="$(mktemp -d "$base/session.XXXXXX")" || return 1
+    chmod 700 "$_ssh_dir"
+    # Liveness stamp for the janitor: this subshell's PID (it runs bwrap and
+    # holds the trap) plus its start-time, written BEFORE the agent exists so a
+    # concurrent sweep never sees a dir of ours unstamped.
+    printf '%s %s\n' "$BASHPID" \
+      "$(awk '{print $22}' "/proc/$BASHPID/stat" 2>/dev/null || echo 0)" > "$_ssh_dir/owner.id"
+    local sock="$_ssh_dir/agent.sock"
+    eval "$(ssh-agent -s -a "$sock")" >/dev/null \
+      || { echo "claude.sh: ssh-agent failed to start" >&2; return 1; }
+    _ssh_agent_pid="$SSH_AGENT_PID"
+    printf '%s\n' "$_ssh_agent_pid" > "$_ssh_dir/agent.pid"
+    trap '_claude_ssh_cleanup' EXIT INT TERM HUP
+
+    local c; local -a add
+    for key in "${!_by_key[@]}"; do
+      add=()
+      [[ -n "$_ssh_timeout" ]] && add+=( -t "$_ssh_timeout" )
+      if [[ -n "${_by_key[$key]}" ]]; then
+        for c in ${_by_key[$key]}; do add+=( -h "$c" ); done   # no spaces in constraints
+        add+=( -H "$kh" )
+        echo "claude.sh: session agent: $key constrained to:${_by_key[$key]}${_ssh_timeout:+  (lifetime $_ssh_timeout)}" >&2
+      else
+        echo "claude.sh: session agent: $key UNRESTRICTED${_ssh_timeout:+  (lifetime $_ssh_timeout)}" >&2
+      fi
+      SSH_AUTH_SOCK="$sock" ssh-add "${add[@]}" "$key" \
+        || { echo "claude.sh: ssh-add failed for $key" >&2; return 1; }
+    done
+
+    args+=(
+      --bind    "$sock" "$sock"
+      --setenv  SSH_AUTH_SOCK "$sock"
+      --ro-bind "$kh" "$kh"
+    )
+    [[ -r "$cfg" ]] && args+=( --ro-bind "$cfg" "$cfg" )
+    return 0
+  }
+  if (( _ssh_want )); then
+    _claude_ssh_setup || { _claude_ssh_cleanup; return 1; }
+  fi
+
+  # With a session agent bash must outlive bwrap to kill the agent and remove
+  # its socket, so it cannot exec. Without one, exec as before.
+  _claude_launch() {
+    if [[ -n "${_ssh_agent_pid:-}" ]]; then
+      local rc=0
+      bwrap "$@" || rc=$?
+      _claude_ssh_cleanup
+      return "$rc"
+    fi
+    exec bwrap "$@"
+  }
+
   args+=( --remount-ro "$HOME" )
 
   # ----- Network mode -----
@@ -631,10 +908,10 @@ claude() (
   case "${CLAUDE_SANDBOX_NET:-proxy}" in
     open)
       args+=( --share-net )
-      exec bwrap "${args[@]}" -- "$claude_bin" "$@"
+      _claude_launch "${args[@]}" -- "$claude_bin" "$@"
       ;;
     none)
-      exec bwrap "${args[@]}" -- "$claude_bin" "$@"
+      _claude_launch "${args[@]}" -- "$claude_bin" "$@"
       ;;
     proxy)
       args+=(
@@ -646,7 +923,7 @@ claude() (
         --setenv NO_PROXY    ""
         --setenv no_proxy    ""
       )
-      exec bwrap "${args[@]}" -- "$claude_bin" "$@"
+      _claude_launch "${args[@]}" -- "$claude_bin" "$@"
       ;;
     strict)
       command -v slirp4netns >/dev/null || {
@@ -672,6 +949,7 @@ claude() (
       trap '
         [[ -n "${_slirp_pid:-}" ]] && kill "$_slirp_pid" 2>/dev/null
         [[ -n "${_bwrap_pid:-}" ]] && kill "$_bwrap_pid" 2>/dev/null
+        _claude_ssh_cleanup
         rm -rf "$_tmp"
       ' EXIT INT TERM
       mkfifo "$_tmp/info" "$_tmp/ready"
