@@ -42,6 +42,7 @@ from typing import Optional
 import torch
 
 from lce_benchmark import (
+    native_stage_env,
     _CUDAPeakMonitor,
     _chunked_forward_backward,
     _reference_forward_backward,
@@ -201,6 +202,7 @@ def _worker(payload: dict) -> None:
         "num_classes": V,
         "dtype": payload["dtype"],
         "mode": payload["mode"],
+        "native_stage": payload["native_stage"],
         "batch_chunk_size": payload["batch_chunk_size"],
         "acc_policy": payload["acc_policy"],
         "time_ms": median,
@@ -216,9 +218,10 @@ def _run_point(payload: dict) -> dict:
         [sys.executable, __file__, "--worker", json.dumps(payload)],
         capture_output=True,
         text=True,
+        env=native_stage_env(os.environ, payload["native_stage"]),
     )
     ident = {k: payload[k] for k in (
-        "num_tokens", "in_features", "num_classes", "dtype", "mode",
+        "num_tokens", "in_features", "num_classes", "dtype", "mode", "native_stage",
         "batch_chunk_size", "acc_policy",
     )}
     if proc.returncode != 0:
@@ -327,7 +330,8 @@ def run_profile(args) -> int:
 
 _KEYS = [
     "device", "sm_count", "total_mem_bytes", "num_tokens", "in_features", "num_classes",
-    "dtype", "mode", "batch_chunk_size", "acc_policy", "time_ms", "memory_peak_bytes", "error",
+    "dtype", "mode", "native_stage", "batch_chunk_size", "acc_policy", "time_ms",
+    "memory_peak_bytes", "error",
 ]
 
 # Best-effort SM counts for the per-SM portability check; correct/extend as
@@ -373,18 +377,25 @@ def measure(args) -> int:
     # constrained cards, where the k*SM chunk may not fit.
     sm = torch.cuda.get_device_properties(0).multi_processor_count if device_type == "cuda" else 0
     total_mem = torch.cuda.get_device_properties(0).total_memory if device_type == "cuda" else 0
+    # Copies: the override below writes into them.
     if args.smoke:
-        grid, fixed = SMOKE_GRID, SMOKE_FIXED
+        grid, fixed = dict(SMOKE_GRID), dict(SMOKE_FIXED)
     elif args.regime == "llm":
-        grid, fixed = LLM_GRID, LLM_FIXED
+        grid, fixed = dict(LLM_GRID), dict(LLM_FIXED)
     else:
-        grid, fixed = DEFAULT_GRID, DEFAULT_FIXED
-    if args.num_tokens:
-        grid["num_tokens"] = args.num_tokens
-    if args.in_features:
-        grid["in_features"] = args.in_features
-    if args.num_classes:
-        grid["num_classes"] = args.num_classes
+        grid, fixed = dict(DEFAULT_GRID), dict(DEFAULT_FIXED)
+    # A CLI axis override updates the swept values AND the fixed default for
+    # that axis, so passing a single value per axis names exactly one point
+    # (same rule as lce_benchmark_sweep.py).
+    for key, override in (
+        ("num_tokens", args.num_tokens),
+        ("in_features", args.in_features),
+        ("num_classes", args.num_classes),
+    ):
+        if override:
+            grid[key] = override
+            if fixed[key] not in override:
+                fixed[key] = sorted(override)[len(override) // 2]
 
     out = Path(args.out)
     existing = set()
@@ -394,7 +405,8 @@ def measure(args) -> int:
                 existing.add((
                     r.get("device", ""),
                     int(r["num_tokens"]), int(r["in_features"]), int(r["num_classes"]),
-                    r["dtype"], r["mode"], r["batch_chunk_size"],
+                    r["dtype"], r["mode"], r.get("native_stage") or "off",
+                    r["batch_chunk_size"],
                 ))
 
     write_header = not out.exists() or args.force
@@ -406,10 +418,14 @@ def measure(args) -> int:
         for dtype in args.dtypes:
             for p in _points(grid, fixed):
                 N = p["num_tokens"]
-                jobs = [{"mode": "reference", "batch_chunk_size": 0}]
+                jobs = [{"mode": "reference", "batch_chunk_size": 0,
+                         "native_stage": "off"}]
                 if args.liger:
-                    jobs.append({"mode": "liger", "batch_chunk_size": 0})
-                jobs += [{"mode": "chunked", "batch_chunk_size": b}
+                    jobs.append({"mode": "liger", "batch_chunk_size": 0,
+                                 "native_stage": "off"})
+                jobs += [{"mode": "chunked", "batch_chunk_size": b,
+                          "native_stage": stage}
+                         for stage in args.native_stages
                          for b in _chunk_sizes(N, args.chunk_grid, args.tile)]
                 for job in jobs:
                     payload = {
@@ -419,7 +435,8 @@ def measure(args) -> int:
                         **job,
                     }
                     key = (tag, N, p["in_features"], p["num_classes"], dtype,
-                           job["mode"], str(job["batch_chunk_size"]))
+                           job["mode"], job["native_stage"],
+                           str(job["batch_chunk_size"]))
                     if key in existing:
                         continue
                     row = _run_point(payload)
@@ -428,7 +445,9 @@ def measure(args) -> int:
                     row["total_mem_bytes"] = total_mem
                     w.writerow(row)
                     f.flush()
-                    blabel = "ref" if job["mode"] == "reference" else f"B={job['batch_chunk_size']}"
+                    blabel = ("ref" if job["mode"] == "reference"
+                              else f"B={job['batch_chunk_size']}"
+                                   f" [{job['native_stage']}]")
                     t = row.get("time_ms", float("nan"))
                     print(f"  N{N} D{p['in_features']} V{p['num_classes']} {dtype} {blabel}: "
                           f"{t:.2f} ms" + (f"  [{row['error'][:60]}]" if row.get("error") else ""))
@@ -444,6 +463,7 @@ def _load(out: Path) -> list[dict]:
     with open(out) as f:
         for r in csv.DictReader(f):
             r["device"] = r.get("device") or "unknown"
+            r["native_stage"] = r.get("native_stage") or "off"
             try:
                 r["sm_count"] = int(r.get("sm_count") or 0)
             except ValueError:
@@ -537,6 +557,31 @@ def _fit_heuristics(summary: list[dict]) -> None:
               "portable heuristic is B = (B/SM) * SM_count.")
 
 
+def _knee_line(args, N, D, V, dt, dev, stage, chunked, rec, summary) -> None:
+    """One knee row for a (shape, stage): B_knee, its time, and whether its
+    peak stays at or below the full-materialization reference."""
+    gib = 1024 ** 3
+    knee = _knee(chunked, args.tol)
+    if knee is None:
+        return
+    valid = [r["time_ms"] for r in chunked if r["time_ms"] == r["time_ms"]]
+    t_best = min(valid)
+    ref = rec.get("ref", {})
+    mem_knee = knee["memory_peak_bytes"] / gib
+    mem_ref = ref.get("memory_peak_bytes", float("nan")) / gib
+    ok = "yes" if mem_knee <= mem_ref else "NO"
+    total_gb = knee.get("total_mem_bytes", 0) / gib
+    vram = f"{100 * mem_knee / total_gb:>5.0f}%" if total_gb else f"{'?':>6}"
+    print(f"{N:>6} {D:>7} {V:>7} {dt:>4} {stage[:18]:>18} | {knee['batch_chunk_size']:>7} "
+          f"{knee['batch_chunk_size']/N:>6.3f} {knee['time_ms']:>8.2f} {t_best:>8.2f} | "
+          f"{mem_knee:>9.3f} {mem_ref:>9.3f} {ok:>7} {vram:>6}")
+    summary.append({
+        "N": N, "D": D, "V": V, "dtype": dt, "device": dev, "native_stage": stage,
+        "sm_count": knee.get("sm_count", 0),
+        "B_knee": knee["batch_chunk_size"], "mem_knee": mem_knee, "mem_ref": mem_ref,
+    })
+
+
 def analyze(args) -> int:
     paths = [Path(p) for p in (args.inputs or [args.out])]
     rows: list[dict] = []
@@ -548,38 +593,23 @@ def analyze(args) -> int:
         if r["mode"] == "reference":
             by_shape[shape]["ref"] = r
         else:
-            by_shape[shape].setdefault("chunked", []).append(r)
+            by_shape[shape].setdefault("chunked", {}).setdefault(
+                r["native_stage"], []
+            ).append(r)
 
     gib = 1024 ** 3
     print(f"\nThroughput knee (within {args.tol:.0%} of best time), per shape:")
-    print(f"{'N':>6} {'D':>7} {'V':>7} {'dt':>4} {'device':>22} | {'B_knee':>7} {'B/N':>6} "
+    print(f"{'N':>6} {'D':>7} {'V':>7} {'dt':>4} {'stage':>18} | {'B_knee':>7} {'B/N':>6} "
           f"{'t_knee':>8} {'t_best':>8} | {'mem_knee':>9} {'mem_ref':>9} {'<=ref?':>7} {'%vram':>6}")
     summary = []
     for shape in sorted(by_shape):
         N, D, V, dt, dev = shape
         rec = by_shape[shape]
-        chunked = rec.get("chunked", [])
-        knee = _knee(chunked, args.tol)
-        if knee is None:
-            continue
-        valid = [r["time_ms"] for r in chunked if r["time_ms"] == r["time_ms"]]
-        t_best = min(valid)
-        ref = rec.get("ref", {})
-        mem_knee = knee["memory_peak_bytes"] / gib
-        mem_ref = ref.get("memory_peak_bytes", float("nan")) / gib
-        ok = "yes" if mem_knee <= mem_ref else "NO"
-        total_gb = knee.get("total_mem_bytes", 0) / gib
-        vram = f"{100 * mem_knee / total_gb:>5.0f}%" if total_gb else f"{'?':>6}"
-        print(f"{N:>6} {D:>7} {V:>7} {dt:>4} {dev[:22]:>22} | {knee['batch_chunk_size']:>7} "
-              f"{knee['batch_chunk_size']/N:>6.3f} {knee['time_ms']:>8.2f} {t_best:>8.2f} | "
-              f"{mem_knee:>9.3f} {mem_ref:>9.3f} {ok:>7} {vram:>6}")
-        summary.append({
-            "N": N, "D": D, "V": V, "dtype": dt, "device": dev,
-            "sm_count": knee.get("sm_count", 0),
-            "B_knee": knee["batch_chunk_size"], "mem_knee": mem_knee, "mem_ref": mem_ref,
-        })
+        for stage, chunked in sorted(rec.get("chunked", {}).items()):
+            _knee_line(args, N, D, V, dt, dev, stage, chunked, rec, summary)
 
     if summary:
+
         knees = [s["B_knee"] for s in summary]
         print(f"\nB_knee: min={min(knees)} max={max(knees)} "
               f"median={sorted(knees)[len(knees)//2]}")
@@ -609,13 +639,9 @@ def _plot(by_shape: dict, out: Path, tol: float) -> None:
     for i, shape in enumerate(shapes):
         N, D, V, dt, dev = shape
         rec = by_shape[shape]
-        chunked = sorted(rec.get("chunked", []), key=lambda r: r["batch_chunk_size"])
-        if not chunked:
+        by_stage = rec.get("chunked", {})
+        if not by_stage:
             continue
-        bs = [r["batch_chunk_size"] for r in chunked]
-        ts = [r["time_ms"] for r in chunked]
-        ms = [r["memory_peak_bytes"] / gib for r in chunked]
-        knee = _knee(chunked, tol)
         ref = rec.get("ref", {})
         mem_ref = ref.get("memory_peak_bytes", float("nan")) / gib
 
@@ -623,16 +649,24 @@ def _plot(by_shape: dict, out: Path, tol: float) -> None:
         cax = i % ncols
         ax_t = axes[rax][cax]
         ax_m = axes[rax + 1][cax]
-        ax_t.plot(bs, ts, marker="o")
-        if knee is not None:
-            ax_t.axvline(knee["batch_chunk_size"], color="green", ls="--", lw=1, label="knee")
-            ax_m.axvline(knee["batch_chunk_size"], color="green", ls="--", lw=1)
+        bs = []
+        for stage, rows_s in sorted(by_stage.items()):
+            rows_s = sorted(rows_s, key=lambda r: r["batch_chunk_size"])
+            b = [r["batch_chunk_size"] for r in rows_s]
+            bs = b if len(b) > len(bs) else bs
+            line, = ax_t.plot(b, [r["time_ms"] for r in rows_s], marker="o", label=stage)
+            ax_m.plot(b, [r["memory_peak_bytes"] / gib for r in rows_s], marker="o",
+                      color=line.get_color(), label=stage)
+            knee = _knee(rows_s, tol)
+            if knee is not None:
+                for ax in (ax_t, ax_m):
+                    ax.axvline(knee["batch_chunk_size"], color=line.get_color(),
+                               ls="--", lw=1)
         ax_t.set_title(f"N{N} D{D} V{V} {dt}\n{dev[:24]}", fontsize=7)
         ax_t.set_ylabel("time (ms)")
         ax_t.set_xscale("log")
         _apply_log_xticks(ax_t, bs)
         ax_t.legend(fontsize=6)
-        ax_m.plot(bs, ms, marker="o", color="tab:red")
         if mem_ref == mem_ref:
             ax_m.axhline(mem_ref, color="black", ls=":", lw=1, label="reference")
         ax_m.set_ylabel("peak mem (GiB)")
@@ -678,6 +712,10 @@ def _parse():
     p.add_argument("--iters", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--tol", type=float, default=0.03, help="throughput-plateau tolerance")
+    p.add_argument("--native-stages", nargs="+", default=["off"],
+                   help="torch._native override levels to measure for the chunked "
+                        "rows; each becomes its own curve. See "
+                        "lce_benchmark.native_stage_env for the level names.")
     p.add_argument("--regime", choices=("budget", "llm"), default="budget",
                    help="budget (in_features>=num_classes, default) or llm (num_classes>>in_features)")
     p.add_argument("--chunk-grid", choices=("pow2", "tile"), default="pow2",

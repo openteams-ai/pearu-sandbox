@@ -120,6 +120,79 @@ def _csv_path(
 # Run a single inner benchmark and write its CSV
 # ---------------------------------------------------------------------------
 
+_MATCH_BPE = {"bfloat16": 4, "float16": 2, "float32": 4}
+
+
+def _liger_matched_chunk_size(
+    csv_path: Path, point: dict, dtype: str, tolerance: float, granularity: int
+) -> int | None:
+    """The largest chunk size whose projected peak memory stays at or below
+    liger's, from rows already recorded for this point.
+
+    With `g` aliased into the logits buffer a chunk costs one (Bc, V) buffer, so
+    peak is linear in Bc: anchoring on the recorded default-variant row gives
+    the slope's intercept, and liger's recorded peak gives the target. Capped at
+    num_tokens (a single chunk), which at most shapes is still BELOW liger --
+    liger materializes more than the chunked path does -- and that is accepted
+    rather than an error: the curve then means "the most memory the chunked path
+    can use".
+    """
+    rows = _load_rows(csv_path)
+    if not rows:
+        return None
+    peaks = {
+        (r["label"], r.get("native_stage") or "off"): r["memory_peak_bytes"]
+        for r in rows
+        if r.get("memory_peak_bytes")
+    }
+    # A previous explicit-chunk run for this point, if any: its (Bc, peak) pair
+    # turns the model's assumed slope into a measured one.
+    measured_anchor = None
+    for r in rows:
+        method = r.get("chunking_method") or ""
+        if method.startswith("explicit:") and r.get("memory_peak_bytes"):
+            measured_anchor = (int(method.split(":", 1)[1]), r["memory_peak_bytes"])
+    liger = peaks.get(("liger", "off"))
+    default_stage = next(
+        (
+            stage
+            for (label, stage) in peaks
+            if label == "auto_fp32" and stage not in ("off", "route")
+        ),
+        None,
+    )
+    ours = peaks.get(("auto_fp32", default_stage)) if default_stage else None
+    if not (liger and ours):
+        return None
+
+    import torch
+    from torch.nn import LinearCrossEntropyOptions
+
+    N, D, V = point["num_tokens"], point["in_features"], point["num_classes"]
+    derived = LinearCrossEntropyOptions(
+        acc_policy="auto", chunking_method="auto"
+    )._adjust(N, D, V, getattr(torch, dtype), device=torch.device("cuda")).batch_chunk_size
+    per_row = V * _MATCH_BPE[dtype]
+    if measured_anchor and measured_anchor[0] != derived:
+        # Two measured points beat one assumed slope: the first pass modelled
+        # peak(Bc) from the chunk accounting alone and undershot liger by up to
+        # 8% at some shapes, because the real curve is flatter than a bare
+        # (Bc, V) buffer suggests (allocator reuse, buffers that do not scale).
+        bc2, peak2 = measured_anchor
+        per_row = (peak2 - ours) / (bc2 - derived)
+        base = ours - derived * per_row
+    else:
+        base = ours - derived * per_row
+    if per_row <= 0:
+        return None
+    # Target liger's peak exactly and round DOWN, so the matched runs never
+    # exceed it; `tolerance` is then the acceptance check on the measured peak,
+    # not a licence to overshoot.
+    target = int((liger - base) // per_row)
+    target = (target // granularity) * granularity
+    return max(derived, min(target, N))
+
+
 def _run_point(
     *,
     point: dict,
@@ -131,17 +204,26 @@ def _run_point(
     bias: bool,
     allow_retain_graph: bool,
     include_acc_none: bool,
+    native_stages: list[str],
+    configs: list[str] | None,
     out_dir: Path,
     warmup: int,
     iters: int,
     force: bool,
+    explicit_chunk_size: int | None = None,
+    config_label: str | None = None,
+    append: bool = False,
 ) -> Path:
     csv_path = _csv_path(out_dir, point, dtype, device_slug, allow_retain_graph, reduction, prob_target, bias)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    if csv_path.exists() and not force:
-        return csv_path
-    if csv_path.exists():
-        csv_path.unlink()
+    # `append` adds rows to an existing point instead of re-recording it: the
+    # inner harness appends, and `force` here would UNLINK the file, taking
+    # every recorded row with it.
+    if not append:
+        if csv_path.exists() and not force:
+            return csv_path
+        if csv_path.exists():
+            csv_path.unlink()
 
     cmd = [
         sys.executable,
@@ -155,7 +237,14 @@ def _run_point(
         "--warmup", str(warmup),
         "--iters", str(iters),
         "--out", str(csv_path),
+        "--native-stages", *native_stages,
     ]
+    if configs:
+        cmd += ["--configs", *configs]
+    if explicit_chunk_size:
+        cmd += ["--explicit-chunk-size", str(explicit_chunk_size)]
+        if config_label:
+            cmd += ["--config-label", config_label]
     if prob_target:
         cmd.append("--prob-target")
     if bias:
@@ -236,6 +325,9 @@ def _plot(
     group_label: str,
     *,
     include_acc_none: bool = False,
+    stages: list[str] | None = None,
+    series: list[str] | None = None,
+    suffix: str = "",
 ) -> None:
     try:
         import matplotlib
@@ -246,6 +338,7 @@ def _plot(
         print(f"matplotlib unavailable: {e}", file=sys.stderr)
         return
 
+    series_filter = set(series) if series else None
     all_rows: list[dict] = []
     for p in csv_paths:
         all_rows.extend(_load_rows(p))
@@ -257,6 +350,12 @@ def _plot(
         all_rows = [r for r in all_rows if _row_is_fp32_or_baseline(r)]
         if not all_rows:
             print(f"no fp32-acc rows for {group_label}; pass --include-acc-none", file=sys.stderr)
+            return
+
+    if stages:
+        all_rows = [r for r in all_rows if (r.get("native_stage") or "off") in stages]
+        if not all_rows:
+            print(f"no rows in stages {stages} for {group_label}", file=sys.stderr)
             return
 
     # Infer per-axis defaults (mode across non-swept axes)
@@ -283,7 +382,11 @@ def _plot(
         ]
         series: dict[str, list[dict]] = defaultdict(list)
         for r in rows:
-            series[r["label"]].append(r)
+            stage = r.get("native_stage") or "off"
+            key = r["label"] if stage == "off" else f'{r["label"]} [{stage}]'
+            if series_filter and key not in series_filter:
+                continue
+            series[key].append(r)
         for label, xs in series.items():
             xs.sort(key=lambda r: r[axis])
         # Collect column-wide x-values so every row in this column gets
@@ -322,7 +425,8 @@ def _plot(
 
     fig.suptitle(f"linear_cross_entropy benchmark sweep: {group_label}")
     fig.tight_layout()
-    png = out_dir / f"sweep_{group_label.replace(' ', '_').replace('/', '_')}.png"
+    stem = group_label.replace(" ", "_").replace("/", "_")
+    png = out_dir / f"sweep_{stem}{suffix}.png"
     fig.savefig(png, dpi=120)
     print(f"wrote {png}")
     plt.close(fig)
@@ -350,6 +454,19 @@ def _parse_args():
         "reference, and liger all consume it)",
     )
     p.add_argument("--allow-retain-graph", action="store_true")
+    p.add_argument(
+        "--native-stages",
+        nargs="+",
+        default=["off"],
+        help="torch._native override levels to measure, passed to the inner "
+        "benchmark; each becomes its own curve.",
+    )
+    p.add_argument(
+        "--configs",
+        nargs="+",
+        default=None,
+        help="restrict to these config labels (default: all).",
+    )
     p.add_argument(
         "--include-acc-none",
         action="store_true",
@@ -385,6 +502,45 @@ def _parse_args():
     p.add_argument("--iters", type=int, default=5)
     p.add_argument("--force", action="store_true", help="re-run even if CSV exists")
     p.add_argument("--plot-only", action="store_true", help="skip benchmarking, just plot")
+    p.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="measure only. Useful when the figures are built afterwards with "
+        "explicit --plot-series / --figure-suffix, so a measurement run cannot "
+        "overwrite a curated figure with an all-series one.",
+    )
+    p.add_argument(
+        "--match-liger-memory",
+        action="store_true",
+        help="also run one chunked config per point with an EXPLICIT chunk size "
+        "chosen so its peak memory approximately matches liger's, computed from "
+        "the rows already recorded for that point. Requires those rows to exist "
+        "(liger and the default variant).",
+    )
+    p.add_argument("--match-tolerance", type=float, default=0.05)
+    p.add_argument("--match-granularity", type=int, default=64)
+    p.add_argument("--config-label", default="ligermem_fp32")
+    p.add_argument(
+        "--plot-series",
+        nargs="+",
+        default=None,
+        help="restrict the figure to these series keys, e.g. auto_fp32 liger "
+        "'ligermem_fp32 [fused_inplace]'. Keys are the labels the legend shows.",
+    )
+    p.add_argument(
+        "--figure-suffix",
+        default="",
+        help="appended to the figure filename, so a second view of the same "
+        "data lands beside the first instead of overwriting it",
+    )
+    p.add_argument(
+        "--plot-stages",
+        nargs="+",
+        default=None,
+        help="restrict the figure to rows from these native stages (the CSVs "
+        "keep every stage either way, so any other view is one re-plot away). "
+        "'off' carries both the aten baseline and liger.",
+    )
     return p.parse_args()
 
 
@@ -446,12 +602,52 @@ def main() -> int:
                         bias=args.bias,
                         allow_retain_graph=args.allow_retain_graph,
                         include_acc_none=args.include_acc_none,
+                        native_stages=args.native_stages,
+                        configs=args.configs,
                         out_dir=data_dir,
                         warmup=args.warmup,
                         iters=args.iters,
                         force=args.force,
                     )
                     csv_paths.append(path)
+                    if args.match_liger_memory:
+                        matched = _liger_matched_chunk_size(
+                            path,
+                            point,
+                            dtype,
+                            args.match_tolerance,
+                            args.match_granularity,
+                        )
+                        if matched is None:
+                            print(
+                                f"  skip match: {path.name} has no liger / "
+                                "default-variant rows to anchor on"
+                            )
+                        else:
+                            print(
+                                f"  matched chunk size {matched} for "
+                                f"{path.name} (label {args.config_label})"
+                            )
+                            _run_point(
+                                point=point,
+                                dtype=dtype,
+                                device_type=device_type,
+                                device_slug=device_slug,
+                                reduction=args.reduction,
+                                prob_target=args.prob_target,
+                                bias=args.bias,
+                                allow_retain_graph=args.allow_retain_graph,
+                                include_acc_none=args.include_acc_none,
+                                native_stages=args.native_stages,
+                                configs=[args.config_label],
+                                out_dir=data_dir,
+                                warmup=args.warmup,
+                                iters=args.iters,
+                                force=False,
+                                explicit_chunk_size=matched,
+                                config_label=args.config_label,
+                                append=True,
+                            )
 
     # Group plots by (dtype, device, reduction, prob_target) so variant
     # sweeps don't clobber or mix with the index-target 'mean' figures
@@ -470,6 +666,9 @@ def main() -> int:
         has_bias = rows[0].get("bias") in (True, "True")
         grouped[(dtype, device_name, reduction, prob, has_bias)].append(p)
 
+    if args.no_plot:
+        return 0
+
     for (dtype, dev_name, reduction, prob, has_bias), paths in grouped.items():
         # Keep the index-target 'mean' figure name unchanged; suffix others.
         group_label = (
@@ -478,7 +677,15 @@ def main() -> int:
             + ("_prob" if prob else "")
             + ("_bias" if has_bias else "")
         )
-        _plot(out_dir, paths, group_label, include_acc_none=args.include_acc_none)
+        _plot(
+            out_dir,
+            paths,
+            group_label,
+            include_acc_none=args.include_acc_none,
+            stages=args.plot_stages,
+            series=args.plot_series,
+            suffix=args.figure_suffix,
+        )
 
     return 0
 

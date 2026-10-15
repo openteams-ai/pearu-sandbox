@@ -64,15 +64,60 @@ def _cpu_device_name() -> str:
     return "cpu"
 
 
+def _torch_commit() -> str:
+    # The torch build's commit. Rows measured before and after a behaviour
+    # change land under the same label and stage otherwise, which has now bitten
+    # three times (BLAS library, liger version, the tier-0 change).
+    return (getattr(torch.version, "git_version", "") or "")[:12]
+
+
+def _liger_version() -> str:
+    try:
+        import importlib.metadata as m
+
+        return m.version("liger-kernel")
+    except Exception:
+        return ""
+
+
+def _lce_impl_md5() -> str:
+    """Fingerprint of the override implementation actually on disk.
+
+    `torch_commit` is the BUILD's git_version, so it cannot tell two
+    Python-only behaviours apart under the same variant name -- which is the
+    provenance gap that bit three times (BLAS library, liger version, the
+    tier-0 change). Hash the source files instead, located through the import
+    system rather than imported, so this works without the DSL runtime.
+    """
+    import hashlib
+    import importlib.util
+
+    h = hashlib.md5()
+    for mod in (
+        "torch._native.ops.linear_cross_entropy.cutedsl_impl",
+        "torch._native.ops.linear_cross_entropy.fused_grad_logits_kernel",
+    ):
+        try:
+            origin = importlib.util.find_spec(mod).origin
+            with open(origin, "rb") as f:
+                h.update(f.read())
+        except Exception:
+            return ""
+    return h.hexdigest()[:12]
+
+
 def _env_info(device_type: str) -> dict:
     """GPU / CUDA-toolkit / driver versions, stamped into every CSV row so a
     plot can never silently mix runs from different (cuBLAS-version-sensitive)
     environments. cuBLAS workspace/algorithm choices vary by CUDA version, so
     memory and time are only comparable within one (gpu, cuda, driver) combo.
+    The torch commit and liger version travel with them for the same reason.
     """
     if device_type != "cuda" or not torch.cuda.is_available():
         return {"gpu_name": _cpu_device_name() if device_type == "cpu" else "",
-                "cuda_version": "", "driver_version": ""}
+                "cuda_version": "", "driver_version": "",
+                "torch_commit": _torch_commit(), "liger_version": _liger_version(),
+                "lce_impl_md5": _lce_impl_md5()}
     driver = ""
     try:
         import pynvml
@@ -89,7 +134,9 @@ def _env_info(device_type: str) -> dict:
         except Exception:
             driver = ""
     return {"gpu_name": torch.cuda.get_device_name(0),
-            "cuda_version": torch.version.cuda or "", "driver_version": driver}
+            "cuda_version": torch.version.cuda or "", "driver_version": driver,
+            "torch_commit": _torch_commit(), "liger_version": _liger_version(),
+            "lce_impl_md5": _lce_impl_md5()}
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +232,10 @@ class Config:
     chunking_method: Optional[str]
     use_chunked: bool = True
     acc_dtype: Optional[str] = None  # "float32" forces mixed-precision path
+    # An explicit chunk size, which disables the heuristic. Used to run the
+    # chunked path at a chosen memory budget rather than at the size the
+    # heuristic derives.
+    batch_chunk_size: Optional[int] = None
 
 
 def _build_configs(dtype: str, include_acc_none: bool = False) -> list[Config]:
@@ -270,6 +321,53 @@ def _chunked_forward_backward(
 # Single-config measurement (runs in subprocess to isolate memory)
 # ---------------------------------------------------------------------------
 
+CHUNKED_OPS = (
+    "_linear_cross_entropy_batch_chunked",
+    "_linear_cross_entropy_batch_chunked_no_reduction",
+)
+
+
+def native_stage_env(env, native_stage: str) -> dict:
+    """Child environment selecting a torch._native override level.
+
+    The overrides register at import time and pick their implementation from
+    the same env, so the level is selected through the child's environment
+    rather than from inside the child:
+      off     no overrides at all -- plain aten
+      route   overrides installed, pinned to the pass-through implementation,
+              so this curve keeps meaning "routing cost only" however many
+              kernels the override module grows
+      default overrides installed at whatever implementation is default
+      other   overrides installed, with the scalar-reduction op pinned to the
+              variant of that name (the no_reduction op declares no kernel
+              variant, so it keeps its default)
+
+    Every stage except `off` and `default` PINS its variant explicitly, so a
+    row keeps meaning the same thing after a default promotion: rows recorded
+    as stage `kernel` before `fused_inplace` became the default and rows
+    recorded after both mean the `kernel` variant. Prefer named stages over
+    `default` in measurement runs for exactly that reason.
+
+    Single source of truth: chunk_size_sweep.py imports this, so a stage name
+    cannot mean one thing in one harness and another in the other.
+    """
+    env = dict(env)
+    env["TORCH_DISABLE_NATIVE_JIT"] = "1" if native_stage == "off" else "0"
+    if native_stage == "route":
+        selection = {op: "passthrough" for op in CHUNKED_OPS}
+    elif native_stage in ("off", "default"):
+        selection = {}
+    else:
+        selection = {CHUNKED_OPS[0]: native_stage}
+    if selection:
+        env["TORCH_NATIVE_OVERRIDE_VARIANTS"] = ";".join(
+            f"torch_nn::{op}={name}" for op, name in selection.items()
+        )
+    else:
+        env.pop("TORCH_NATIVE_OVERRIDE_VARIANTS", None)
+    return env
+
+
 def _measure_in_subprocess(
     *,
     num_tokens: int,
@@ -302,6 +400,7 @@ def _measure_in_subprocess(
         "chunking_method": config.chunking_method,
         "use_chunked": config.use_chunked,
         "acc_dtype": config.acc_dtype,
+        "batch_chunk_size": config.batch_chunk_size,
         "native_stage": native_stage,
         "allow_retain_graph": allow_retain_graph,
         "warmup": warmup,
@@ -310,10 +409,10 @@ def _measure_in_subprocess(
         "seed": seed,
     }
 
-    # The overrides register at import time, so the level is selected through
-    # the child's environment rather than from inside the child.
-    env = dict(os.environ)
-    env["TORCH_DISABLE_NATIVE_JIT"] = "1" if native_stage == "off" else "0"
+    # The overrides register at import time and pick their implementation from
+    # the same env, so the level is selected through the child's environment
+    # rather than from inside the child:
+    env = native_stage_env(os.environ, native_stage)
     proc = subprocess.run(
         [sys.executable, __file__, "--worker", json.dumps(payload)],
         capture_output=True,
@@ -327,6 +426,7 @@ def _measure_in_subprocess(
         "acc_policy": config.acc_policy,
         "chunking_method": config.chunking_method,
         "acc_dtype": config.acc_dtype,
+        "batch_chunk_size": config.batch_chunk_size,
         "native_stage": native_stage,
         "num_tokens": num_tokens,
         "in_features": in_features,
@@ -423,9 +523,12 @@ def _worker_main(payload: dict) -> None:
     elif payload["use_chunked"]:
         from torch.nn import LinearCrossEntropyOptions
         acc_dtype = dtype_map[payload["acc_dtype"]] if payload.get("acc_dtype") else None
+        explicit_chunk = payload.get("batch_chunk_size")
         options = LinearCrossEntropyOptions(
             acc_policy=payload["acc_policy"],
-            chunking_method=payload["chunking_method"],
+            # An explicit size and the heuristic are mutually exclusive.
+            chunking_method=None if explicit_chunk else payload["chunking_method"],
+            batch_chunk_size=explicit_chunk,
             acc_dtype=acc_dtype,
             allow_retain_graph=payload["allow_retain_graph"],
         )
@@ -649,12 +752,21 @@ def _parse_args():
     )
     p.add_argument("--allow-retain-graph", action="store_true")
     p.add_argument(
+        "--configs",
+        nargs="+",
+        default=None,
+        help="restrict to these config labels (default: every config built for "
+        "the dtype, plus reference and liger)",
+    )
+    p.add_argument(
         "--native-stages",
         nargs="+",
         default=["off"],
         help="torch._native override levels to measure for the chunked configs: "
-        "'off' runs with TORCH_DISABLE_NATIVE_JIT=1 (the aten baseline), any "
-        "other name enables the overrides and labels the rows with that stage.",
+        "'off' runs with TORCH_DISABLE_NATIVE_JIT=1 (the aten baseline), "
+        "'route' pins the overrides to pass-through, 'kernel' runs them at "
+        "their default, and any other name selects the override variant of "
+        "that name. Rows are labelled with the stage.",
     )
     p.add_argument(
         "--include-acc-none",
@@ -662,6 +774,21 @@ def _parse_args():
         help="for fp16/bf16 input, also include configs with acc_dtype=None "
         "(the input-dtype-only path). By default only the _fp32 variants "
         "(acc_dtype=torch.float32, the realistic training path) are emitted.",
+    )
+    p.add_argument(
+        "--explicit-chunk-size",
+        type=int,
+        default=None,
+        help="add one chunked config pinning batch_chunk_size to this value "
+        "(which disables the heuristic), for running the chunked path at a "
+        "chosen memory budget instead of at the derived size",
+    )
+    p.add_argument(
+        "--config-label",
+        default="explicit_fp32",
+        help="label for the --explicit-chunk-size config. Rows group into "
+        "curves by label, so a label that stays the same across points is what "
+        "makes the sweep plot one curve.",
     )
     p.add_argument("--no-grad-error-check", action="store_true")
     p.add_argument("--warmup", type=int, default=2)
@@ -700,6 +827,21 @@ def main() -> int:
         configs = _build_configs(dtype, include_acc_none=args.include_acc_none)
         if has_liger:
             configs.append(Config("liger", None, None, use_chunked=False))
+        if args.explicit_chunk_size:
+            configs.append(
+                Config(
+                    args.config_label,
+                    "auto",
+                    # Recorded in the chunking_method column so the row says how
+                    # its chunk size was chosen; the worker takes the size from
+                    # `batch_chunk_size` and passes chunking_method=None.
+                    f"explicit:{args.explicit_chunk_size}",
+                    acc_dtype="float32" if dtype in ("float16", "bfloat16") else None,
+                    batch_chunk_size=args.explicit_chunk_size,
+                )
+            )
+        if args.configs:
+            configs = [c for c in configs if c.label in args.configs]
         for cfg in configs:
             # Only the chunked path routes through an override, so the
             # reference and liger curves are measured once.
@@ -746,6 +888,9 @@ def main() -> int:
             "gpu_name",
             "cuda_version",
             "driver_version",
+            "torch_commit",
+            "liger_version",
+            "lce_impl_md5",
             "reduction",
             "prob_target",
             "bias",
